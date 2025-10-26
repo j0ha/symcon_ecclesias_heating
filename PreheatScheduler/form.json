@@ -57,6 +57,13 @@
       "maximum": 900
     },
     {
+      "type": "NumberSpinner",
+      "name": "UpcomingEventsCount",
+      "caption": "Number of upcoming events",
+      "minimum": 1,
+      "maximum": 20
+    },
+    {
       "type": "Select",
       "name": "HoldStrategy",
       "caption": "Hold strategy",
@@ -85,6 +92,11 @@
     {
       "type": "Label",
       "caption": "Next preheat start: {{GetValueString(IPS_GetObjectIDByIdent('NextPreheatStartISO', $id))}}"
+    },
+    {
+      "type": "HTMLBox",
+      "caption": "Upcoming events",
+      "html": "{{GetValueString(IPS_GetObjectIDByIdent('UpcomingEventsHTML', $id))}}"
     }
   ],
   "status": [
