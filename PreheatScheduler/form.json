@@ -26,7 +26,7 @@
       "type": "NumberSpinner",
       "name": "HeatingRate",
       "caption": "Heating rate (°C/hour)",
-      "minimum": 0.1,
+      "minimum": 0,
       "digits": 1,
       "suffix": "°C/h"
     },
@@ -80,39 +80,37 @@
     },
     {
       "type": "Label",
-      "caption": "Next event start:",
-      "value": "{{GetValueString(IPS_GetObjectIDByIdent('NextEventStartISO', $id))}}"
+      "caption": "Next event start: {{GetValueString(IPS_GetObjectIDByIdent('NextEventStartISO', $id))}}"
     },
     {
       "type": "Label",
-      "caption": "Next preheat start:",
-      "value": "{{GetValueString(IPS_GetObjectIDByIdent('NextPreheatStartISO', $id))}}"
+      "caption": "Next preheat start: {{GetValueString(IPS_GetObjectIDByIdent('NextPreheatStartISO', $id))}}"
     }
   ],
   "status": [
     {
       "code": 101,
-      "icon": "",
+      "icon": "active",
       "caption": "Creating instance"
     },
     {
       "code": 102,
-      "icon": "",
+      "icon": "active",
       "caption": "Active"
     },
     {
       "code": 104,
-      "icon": "",
+      "icon": "inactive",
       "caption": "Inactive"
     },
     {
       "code": 201,
-      "icon": "",
+      "icon": "error",
       "caption": "Calendar URL unreachable"
     },
     {
       "code": 202,
-      "icon": "",
+      "icon": "error",
       "caption": "Calendar authentication failed"
     }
   ]
