@@ -1,0 +1,119 @@
+{
+  "elements": [
+    {
+      "type": "ValidationTextBox",
+      "name": "CalendarURL",
+      "caption": "Calendar URL (ICS or CalDAV export)"
+    },
+    {
+      "type": "ValidationTextBox",
+      "name": "CalUser",
+      "caption": "Calendar username"
+    },
+    {
+      "type": "PasswordTextBox",
+      "name": "CalPass",
+      "caption": "Calendar password"
+    },
+    {
+      "type": "NumberSpinner",
+      "name": "SetpointWarm",
+      "caption": "Warm setpoint (°C)",
+      "digits": 1,
+      "suffix": "°C"
+    },
+    {
+      "type": "NumberSpinner",
+      "name": "HeatingRate",
+      "caption": "Heating rate (°C/hour)",
+      "minimum": 0.1,
+      "digits": 1,
+      "suffix": "°C/h"
+    },
+    {
+      "type": "SelectVariable",
+      "name": "TempVarID",
+      "caption": "Current temperature variable"
+    },
+    {
+      "type": "NumberSpinner",
+      "name": "LookaheadHours",
+      "caption": "Lookahead horizon (hours)",
+      "minimum": 1,
+      "maximum": 168
+    },
+    {
+      "type": "NumberSpinner",
+      "name": "PreheatBufferMin",
+      "caption": "Preheat buffer (minutes)",
+      "minimum": 0,
+      "maximum": 120
+    },
+    {
+      "type": "NumberSpinner",
+      "name": "EvaluationIntervalSec",
+      "caption": "Evaluation interval (seconds)",
+      "minimum": 15,
+      "maximum": 900
+    },
+    {
+      "type": "Select",
+      "name": "HoldStrategy",
+      "caption": "Hold strategy",
+      "options": [
+        {
+          "caption": "Hold until event end",
+          "value": 0
+        },
+        {
+          "caption": "Only until event start",
+          "value": 1
+        }
+      ]
+    }
+  ],
+  "actions": [
+    {
+      "type": "Button",
+      "caption": "Test calculation now",
+      "onClick": "echo \"Heating demand: \" . (HEAT_Recalculate($id) ? \"ON\" : \"OFF\");"
+    },
+    {
+      "type": "Label",
+      "caption": "Next event start:",
+      "value": "{{GetValueString(IPS_GetObjectIDByIdent('NextEventStartISO', $id))}}"
+    },
+    {
+      "type": "Label",
+      "caption": "Next preheat start:",
+      "value": "{{GetValueString(IPS_GetObjectIDByIdent('NextPreheatStartISO', $id))}}"
+    }
+  ],
+  "status": [
+    {
+      "code": 101,
+      "icon": "",
+      "caption": "Creating instance"
+    },
+    {
+      "code": 102,
+      "icon": "",
+      "caption": "Active"
+    },
+    {
+      "code": 104,
+      "icon": "",
+      "caption": "Inactive"
+    },
+    {
+      "code": 201,
+      "icon": "",
+      "caption": "Calendar URL unreachable"
+    },
+    {
+      "code": 202,
+      "icon": "",
+      "caption": "Calendar authentication failed"
+    }
+  ]
+}
