@@ -30,9 +30,9 @@ class PreheatScheduler extends IPSModule
         $nextPreheatVarID = $this->RegisterVariableString('NextPreheatStartISO', $this->Translate('Next Preheat Start'));
         IPS_SetVariableCustomProfile($nextPreheatVarID, '~String');
 
-        $this->SetValueBoolean('HeatingDemand', false);
-        $this->SetValueString('NextEventStartISO', '-');
-        $this->SetValueString('NextPreheatStartISO', '-');
+        $this->SetValue('HeatingDemand', false);
+        $this->SetValue('NextEventStartISO', '-');
+        $this->SetValue('NextPreheatStartISO', '-');
 
         $this->RegisterTimer('Evaluate', 0, 'HEAT_Recalculate($_IPS[\'TARGET\']);');
 
@@ -161,11 +161,11 @@ class PreheatScheduler extends IPSModule
             }
         }
 
-        $this->SetValueString('NextEventStartISO', $eventStartISO);
-        $this->SetValueString('NextPreheatStartISO', $preheatStartISO);
+        $this->SetValue('NextEventStartISO', $eventStartISO);
+        $this->SetValue('NextPreheatStartISO', $preheatStartISO);
 
         if ($shouldBeOn !== $currentlyOn) {
-            $this->SetValueBoolean('HeatingDemand', $shouldBeOn);
+            $this->SetValue('HeatingDemand', $shouldBeOn);
         }
 
         return $shouldBeOn;
