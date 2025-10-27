@@ -94,9 +94,9 @@
       "caption": "Next preheat start: {{GetValueString(IPS_GetObjectIDByIdent('NextPreheatStartISO', $id))}}"
     },
     {
-      "type": "HTMLBox",
-      "caption": "Upcoming events",
-      "html": "{{GetValueString(IPS_GetObjectIDByIdent('UpcomingEventsHTML', $id))}}"
+      "type": "Label",
+      "name": "UpcomingEventsPlaceholder",
+      "caption": "Upcoming events preview requires IP-Symcon 7.1 or newer. Please use the WebFront variable instead."
     }
   ],
   "status": [
