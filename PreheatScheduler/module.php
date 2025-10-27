@@ -430,13 +430,15 @@ class PreheatScheduler extends IPSModule
             $form['actions'] = [];
         }
 
-        if (!$this->SupportsHtmlBoxInConfigurationForm()) {
+        if ($this->SupportsHtmlBoxInConfigurationForm()) {
             foreach ($form['actions'] as $index => $action) {
-                if (($action['type'] ?? '') === 'HTMLBox') {
+                if (($action['name'] ?? '') === 'UpcomingEventsPlaceholder') {
                     $form['actions'][$index] = [
-                        'type'    => 'Label',
-                        'caption' => $this->Translate('The upcoming events preview requires IP-Symcon 7.1 or newer. Please use the WebFront variable instead.')
+                        'type'    => 'HTMLBox',
+                        'caption' => $this->Translate('Upcoming events'),
+                        'html'    => '{{GetValueString(IPS_GetObjectIDByIdent("UpcomingEventsHTML", $id))}}'
                     ];
+                    break;
                 }
             }
         }
