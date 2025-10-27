@@ -381,14 +381,18 @@ class PreheatScheduler extends IPSModule
             if (str_starts_with($upper, 'DTSTART')) {
                 [$meta, $value] = $this->SplitMetaValue($line);
                 $start = $this->ParseICSTime($meta, $value);
-            } elseif (str_starts_with($upper, 'DTEND')) {
+                continue;
+            }
+
+            if (str_starts_with($upper, 'DTEND')) {
                 [$meta, $value] = $this->SplitMetaValue($line);
                 $end = $this->ParseICSTime($meta, $value);
-            } elseif (str_starts_with($upper, 'SUMMARY')) {
+                continue;
+            }
+
+            if (str_starts_with($upper, 'SUMMARY')) {
                 [, $value] = $this->SplitMetaValue($line);
                 $summary = $this->UnescapeICSText($value);
-            } elseif ($start !== null && $end !== null) {
-                break;
             }
         }
 
@@ -403,8 +407,69 @@ class PreheatScheduler extends IPSModule
         return [
             'start' => $start,
             'end'   => $end,
-            'summary' => $summary
+            'summary' => $summary ?? ''
         ];
+    }
+
+    public function GetConfigurationForm()
+    {
+        $formPath = __DIR__ . '/form.json';
+        $form = [];
+
+        if (is_file($formPath)) {
+            $content = file_get_contents($formPath);
+            if ($content !== false) {
+                $decoded = json_decode($content, true);
+                if (is_array($decoded)) {
+                    $form = $decoded;
+                }
+            }
+        }
+
+        if (!isset($form['actions']) || !is_array($form['actions'])) {
+            $form['actions'] = [];
+        }
+
+        if (!$this->SupportsHtmlBoxInConfigurationForm()) {
+            foreach ($form['actions'] as $index => $action) {
+                if (($action['type'] ?? '') === 'HTMLBox') {
+                    $form['actions'][$index] = [
+                        'type'    => 'Label',
+                        'caption' => $this->Translate('The upcoming events preview requires IP-Symcon 7.1 or newer. Please use the WebFront variable instead.')
+                    ];
+                }
+            }
+        }
+
+        $json = json_encode($form);
+        if ($json === false) {
+            $this->Log('Failed to encode configuration form.');
+            return '{}';
+        }
+
+        return $json;
+    }
+
+    private function SupportsHtmlBoxInConfigurationForm(): bool
+    {
+        $version = IPS_GetKernelVersion();
+        if (!is_string($version)) {
+            return false;
+        }
+
+        $parts = explode('.', $version);
+        $major = (int) ($parts[0] ?? 0);
+        $minor = (int) ($parts[1] ?? 0);
+
+        if ($major > 7) {
+            return true;
+        }
+
+        if ($major === 7 && $minor >= 1) {
+            return true;
+        }
+
+        return false;
     }
 
     private function SplitMetaValue(string $line): array
