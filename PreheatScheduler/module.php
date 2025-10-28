@@ -318,7 +318,6 @@ class PreheatScheduler extends IPSModule
         }
 
         $unfolded = [];
-        $summary = null;
         foreach ($lines as $line) {
             if ($line === '') {
                 $unfolded[] = '';
@@ -365,6 +364,8 @@ class PreheatScheduler extends IPSModule
     {
         $start = null;
         $end = null;
+        $summary = null;
+
         foreach ($lines as $line) {
             $upper = strtoupper($line);
             if (str_starts_with($upper, 'DTSTART')) {
