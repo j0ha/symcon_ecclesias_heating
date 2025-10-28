@@ -223,6 +223,8 @@ class PreheatScheduler extends IPSModule
         $lookaheadSeconds = max(1, $this->ReadPropertyInteger('LookaheadHours')) * 3600;
         $horizon = $now + $lookaheadSeconds;
 
+        $events = $this->ExpandRecurringEvents($events, $now, $horizon);
+
         $nextEvent = null;
         $upcomingEvents = [];
         foreach ($events as $event) {
@@ -379,12 +381,16 @@ class PreheatScheduler extends IPSModule
         $end = null;
         $summary = '';
         $status = '';
+        $timezone = null;
+        $rrule = '';
+        $rdates = [];
+        $exdates = [];
 
         foreach ($lines as $line) {
             $upper = strtoupper($line);
             if (str_starts_with($upper, 'DTSTART')) {
                 [$meta, $value] = $this->SplitMetaValue($line);
-                $start = $this->ParseICSTime($meta, $value);
+                $start = $this->ParseICSTime($meta, $value, $timezone);
                 continue;
             }
 
@@ -405,6 +411,24 @@ class PreheatScheduler extends IPSModule
                 $status = strtoupper(trim($this->UnescapeICSText($value)));
                 continue;
             }
+
+            if (str_starts_with($upper, 'RRULE')) {
+                [, $value] = $this->SplitMetaValue($line);
+                $rrule = trim($value);
+                continue;
+            }
+
+            if (str_starts_with($upper, 'RDATE')) {
+                [$meta, $value] = $this->SplitMetaValue($line);
+                $rdates = array_merge($rdates, $this->ParseICSMultipleTimes($meta, $value));
+                continue;
+            }
+
+            if (str_starts_with($upper, 'EXDATE')) {
+                [$meta, $value] = $this->SplitMetaValue($line);
+                $exdates = array_merge($exdates, $this->ParseICSMultipleTimes($meta, $value));
+                continue;
+            }
         }
 
         if ($start === null || $end === null) {
@@ -419,7 +443,11 @@ class PreheatScheduler extends IPSModule
             'start' => $start,
             'end'   => $end,
             'summary' => $summary,
-            'status' => $status
+            'status' => $status,
+            'timezone' => $timezone,
+            'rrule' => $rrule,
+            'rdates' => $rdates,
+            'exdates' => $exdates
         ];
     }
 
@@ -439,8 +467,27 @@ class PreheatScheduler extends IPSModule
         return str_replace('\\\\', '\\', $value);
     }
 
-    private function ParseICSTime(string $meta, string $value): ?int
+    private function ParseICSMultipleTimes(string $meta, string $value): array
     {
+        $timestamps = [];
+        $parts = explode(',', $value);
+        foreach ($parts as $part) {
+            $part = trim($part);
+            if ($part === '') {
+                continue;
+            }
+            $timestamp = $this->ParseICSTime($meta, $part);
+            if ($timestamp !== null) {
+                $timestamps[] = $timestamp;
+            }
+        }
+
+        return $timestamps;
+    }
+
+    private function ParseICSTime(string $meta, string $value, ?string &$timezoneName = null): ?int
+    {
+        $timezoneName = null;
         $value = trim($value);
         if ($value === '') {
             return null;
@@ -477,6 +524,7 @@ class PreheatScheduler extends IPSModule
         if ($tz === null) {
             $tz = new DateTimeZone(date_default_timezone_get());
         }
+        $timezoneName = $tz->getName();
 
         $formats = ['Ymd\THis', 'Ymd\THi', 'Ymd\TH', 'Ymd'];
         $dateTime = null;
@@ -498,6 +546,7 @@ class PreheatScheduler extends IPSModule
         if (str_ends_with($value, 'Z')) {
             $dateTime = new DateTime($dateTime->format('c'));
             $dateTime->setTimezone(new DateTimeZone('UTC'));
+            $timezoneName = 'UTC';
         }
 
         return $dateTime->getTimestamp();
@@ -638,6 +687,359 @@ class PreheatScheduler extends IPSModule
         }
 
         return $filtered;
+    }
+
+    private function ExpandRecurringEvents(array $events, int $windowStart, int $windowEnd): array
+    {
+        $expanded = [];
+
+        foreach ($events as $event) {
+            if (!isset($event['start'], $event['end'])) {
+                continue;
+            }
+
+            $duration = (int) $event['end'] - (int) $event['start'];
+            if ($duration <= 0) {
+                continue;
+            }
+
+            $rrule = '';
+            if (isset($event['rrule']) && is_string($event['rrule'])) {
+                $rrule = trim($event['rrule']);
+            }
+
+            $rdates = [];
+            if (isset($event['rdates']) && is_array($event['rdates'])) {
+                $rdates = array_values(array_filter($event['rdates'], 'is_int'));
+            }
+
+            $exdates = [];
+            if (isset($event['exdates']) && is_array($event['exdates'])) {
+                $exdates = array_values(array_filter($event['exdates'], 'is_int'));
+            }
+
+            $timezone = null;
+            if (isset($event['timezone']) && is_string($event['timezone']) && $event['timezone'] !== '') {
+                $timezone = $event['timezone'];
+            }
+
+            $occurrenceStarts = [(int) $event['start']];
+            foreach ($rdates as $timestamp) {
+                $occurrenceStarts[] = $timestamp;
+            }
+
+            if ($rrule !== '') {
+                $generated = $this->GenerateRRuleOccurrences((int) $event['start'], $rrule, $timezone, $windowStart, $windowEnd);
+                foreach ($generated as $timestamp) {
+                    $occurrenceStarts[] = $timestamp;
+                }
+            }
+
+            $occurrenceStarts = array_values(array_unique(array_filter($occurrenceStarts, 'is_int')));
+            sort($occurrenceStarts);
+
+            foreach ($occurrenceStarts as $startTimestamp) {
+                if (in_array($startTimestamp, $exdates, true)) {
+                    continue;
+                }
+
+                $endTimestamp = $startTimestamp + $duration;
+                if ($endTimestamp <= 0) {
+                    continue;
+                }
+
+                if ($startTimestamp > $windowEnd) {
+                    continue;
+                }
+
+                $occurrence = $event;
+                $occurrence['start'] = $startTimestamp;
+                $occurrence['end'] = $endTimestamp;
+                $occurrence['rrule'] = '';
+                $occurrence['rdates'] = [];
+                $occurrence['exdates'] = [];
+                $expanded[] = $occurrence;
+            }
+        }
+
+        usort($expanded, static fn($a, $b) => ($a['start'] ?? 0) <=> ($b['start'] ?? 0));
+
+        return $expanded;
+    }
+
+    private function GenerateRRuleOccurrences(int $baseStart, string $rrule, ?string $timezoneName, int $windowStart, int $windowEnd): array
+    {
+        $rule = $this->ParseRRule($rrule);
+        if (empty($rule)) {
+            return [];
+        }
+
+        $freq = strtoupper($rule['FREQ'] ?? '');
+        if ($freq === '') {
+            return [];
+        }
+
+        $interval = max(1, (int) ($rule['INTERVAL'] ?? 1));
+        $remaining = null;
+        if (array_key_exists('COUNT', $rule)) {
+            $count = max(0, (int) $rule['COUNT']);
+            if ($count <= 1) {
+                return [];
+            }
+            $remaining = $count - 1;
+        }
+
+        $until = null;
+        if (array_key_exists('UNTIL', $rule)) {
+            $until = $this->ParseRRuleUntil($rule['UNTIL'], $timezoneName, $baseStart);
+            if ($until !== null && $until < $baseStart) {
+                return [];
+            }
+        }
+
+        $tzName = $timezoneName;
+        if ($tzName === null || $tzName === '') {
+            $tzName = date_default_timezone_get();
+        }
+
+        try {
+            $tz = new DateTimeZone($tzName);
+        } catch (\Throwable $e) {
+            $tz = new DateTimeZone(date_default_timezone_get());
+        }
+
+        $baseDate = (new DateTimeImmutable('@' . $baseStart))->setTimezone($tz);
+
+        $occurrences = [];
+
+        if ($freq === 'DAILY') {
+            $intervalSeconds = 86400 * $interval;
+            $targetIndex = 0;
+            if ($intervalSeconds > 0 && $windowStart > $baseStart) {
+                $targetIndex = (int) floor(($windowStart - $baseStart) / $intervalSeconds);
+            }
+            $startIndex = max(1, $targetIndex);
+
+            if ($remaining !== null) {
+                $skipped = $startIndex - 1;
+                if ($skipped >= $remaining) {
+                    return [];
+                }
+                $remaining -= $skipped;
+            }
+
+            $current = $baseDate->add(new DateInterval('P' . ($startIndex * $interval) . 'D'));
+            $iterations = 0;
+            while ($remaining === null || $remaining > 0) {
+                $iterations++;
+                if ($iterations > 2000) {
+                    break;
+                }
+
+                $timestamp = $current->getTimestamp();
+                if ($until !== null && $timestamp > $until) {
+                    break;
+                }
+                if ($timestamp > $windowEnd) {
+                    break;
+                }
+
+                $occurrences[] = $timestamp;
+
+                if ($remaining !== null) {
+                    $remaining--;
+                    if ($remaining <= 0) {
+                        break;
+                    }
+                }
+
+                $current = $current->add(new DateInterval('P' . $interval . 'D'));
+            }
+
+            return $occurrences;
+        }
+
+        if ($freq === 'WEEKLY') {
+            $bydayTokens = [];
+            if (array_key_exists('BYDAY', $rule)) {
+                $bydayTokens = array_filter(array_map('trim', explode(',', (string) $rule['BYDAY'])));
+            }
+
+            $weekDays = [];
+            foreach ($bydayTokens as $token) {
+                $weekday = $this->MapWeekday($token);
+                if ($weekday !== null) {
+                    $weekDays[] = $weekday;
+                }
+            }
+            if (empty($weekDays)) {
+                $weekDays[] = (int) $baseDate->format('w');
+            }
+            $weekDays = array_values(array_unique($weekDays));
+            sort($weekDays);
+
+            $occurrencesPerInterval = count($weekDays);
+            $baseWeekday = (int) $baseDate->format('w');
+
+            $secondsDiff = max(0, $windowStart - $baseStart);
+            $weeksDiff = (int) floor($secondsDiff / 604800);
+            $intervalPeriods = (int) floor($weeksDiff / $interval);
+            $startIntervalIndex = $intervalPeriods > 0 ? $intervalPeriods - 1 : 0;
+            if ($startIntervalIndex < 0) {
+                $startIntervalIndex = 0;
+            }
+
+            if ($remaining !== null) {
+                $skippedOccurrences = $startIntervalIndex * $occurrencesPerInterval;
+                if ($skippedOccurrences >= $remaining) {
+                    return [];
+                }
+                $remaining -= $skippedOccurrences;
+            }
+
+            $iteration = 0;
+            for ($intervalIndex = $startIntervalIndex; $remaining === null || $remaining > 0; $intervalIndex++) {
+                $iteration++;
+                if ($iteration > 520) {
+                    break;
+                }
+
+                $weekOffset = $intervalIndex * $interval;
+                foreach ($weekDays as $weekday) {
+                    $dayOffset = ($weekday - $baseWeekday + 7) % 7 + 7 * $weekOffset;
+                    if ($weekOffset === 0 && $dayOffset === 0) {
+                        continue;
+                    }
+
+                    $candidate = $baseDate->modify('+' . $dayOffset . ' days');
+                    $timestamp = $candidate->getTimestamp();
+
+                    if ($timestamp <= $baseStart) {
+                        continue;
+                    }
+
+                    if ($until !== null && $timestamp > $until) {
+                        $remaining = 0;
+                        break 2;
+                    }
+
+                    if ($timestamp < $windowStart) {
+                        if ($remaining !== null) {
+                            if ($remaining === 0) {
+                                break 2;
+                            }
+                            $remaining--;
+                            continue;
+                        }
+                        continue;
+                    }
+
+                    if ($timestamp > $windowEnd) {
+                        $remaining = 0;
+                        break 2;
+                    }
+
+                    $occurrences[] = $timestamp;
+
+                    if ($remaining !== null) {
+                        $remaining--;
+                        if ($remaining <= 0) {
+                            break 2;
+                        }
+                    }
+                }
+            }
+
+            return $occurrences;
+        }
+
+        return [];
+    }
+
+    private function ParseRRule(string $rrule): array
+    {
+        $result = [];
+        $parts = explode(';', $rrule);
+        foreach ($parts as $part) {
+            $part = trim($part);
+            if ($part === '') {
+                continue;
+            }
+            $pair = explode('=', $part, 2);
+            if (count($pair) !== 2) {
+                continue;
+            }
+            $result[strtoupper($pair[0])] = trim($pair[1]);
+        }
+
+        return $result;
+    }
+
+    private function ParseRRuleUntil(string $value, ?string $timezoneName, int $referenceTimestamp): ?int
+    {
+        $value = trim($value);
+        if ($value === '') {
+            return null;
+        }
+
+        $valueNoZ = $value;
+        $tz = null;
+        if (str_ends_with($valueNoZ, 'Z')) {
+            $valueNoZ = substr($valueNoZ, 0, -1);
+            $tz = new DateTimeZone('UTC');
+        } else {
+            $tzName = $timezoneName;
+            if ($tzName === null || $tzName === '') {
+                $tzName = date_default_timezone_get();
+            }
+            try {
+                $tz = new DateTimeZone($tzName);
+            } catch (\Throwable $e) {
+                $tz = new DateTimeZone(date_default_timezone_get());
+            }
+        }
+
+        $formats = ['Ymd\THis', 'Ymd\THi', 'Ymd'];
+        foreach ($formats as $format) {
+            $dateTime = DateTimeImmutable::createFromFormat($format, $valueNoZ, $tz);
+            if ($dateTime instanceof DateTimeImmutable) {
+                if ($format === 'Ymd') {
+                    $dateTime = $dateTime->setTime(
+                        (int) date('H', $referenceTimestamp),
+                        (int) date('i', $referenceTimestamp),
+                        (int) date('s', $referenceTimestamp)
+                    );
+                }
+
+                return $dateTime->getTimestamp();
+            }
+        }
+
+        return null;
+    }
+
+    private function MapWeekday(string $token): ?int
+    {
+        $token = strtoupper(trim($token));
+        if ($token === '') {
+            return null;
+        }
+
+        if (strlen($token) > 2) {
+            $token = substr($token, -2);
+        }
+
+        $map = [
+            'SU' => 0,
+            'MO' => 1,
+            'TU' => 2,
+            'WE' => 3,
+            'TH' => 4,
+            'FR' => 5,
+            'SA' => 6
+        ];
+
+        return $map[$token] ?? null;
     }
 
     private function GetBlacklistRules(): array

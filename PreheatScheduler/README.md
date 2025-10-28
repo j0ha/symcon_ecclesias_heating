@@ -15,6 +15,7 @@ The module exposes one boolean variable `Heating Demand`. Link this variable to 
 
 ## Limitations
 
-* Complex recurring events (RRULE) are not expanded; ensure the calendar export provides discrete events or pre-expanded series.
+* Recurring events with daily or weekly RRULE patterns (including BYDAY, RDATE and EXDATE) are expanded automatically. More
+  complex rules such as monthly patterns are not supported yet; ensure those series are pre-expanded by the calendar export.
 * The module controls only the demand signal; actual heating control must be implemented separately in Symcon.
 * Authentication credentials are stored in Symcon configuration. Prefer using tokenised URLs when supported by the calendar server.
