@@ -8,7 +8,7 @@ class PreheatScheduler extends IPSModule
     private const STATUS_URL_ERROR = 201;
     private const STATUS_AUTH_ERROR = 202;
 
-    private array $invalidBlacklistPatterns = [];
+    private bool $legacyBlacklistWarningIssued = false;
 
     public function Create()
     {
@@ -621,8 +621,8 @@ class PreheatScheduler extends IPSModule
 
     private function FilterBlacklistedEvents(array $events): array
     {
-        $patterns = $this->GetBlacklistPatterns();
-        if (empty($patterns)) {
+        $rules = $this->GetBlacklistRules();
+        if (empty($rules)) {
             return $events;
         }
 
@@ -631,7 +631,7 @@ class PreheatScheduler extends IPSModule
             if (!is_array($event)) {
                 continue;
             }
-            if ($this->IsEventBlacklisted($event, $patterns)) {
+            if ($this->IsEventBlacklisted($event, $rules)) {
                 continue;
             }
             $filtered[] = $event;
@@ -640,7 +640,7 @@ class PreheatScheduler extends IPSModule
         return $filtered;
     }
 
-    private function GetBlacklistPatterns(): array
+    private function GetBlacklistRules(): array
     {
         $raw = $this->ReadPropertyString('EventBlacklist');
         if ($raw === '') {
@@ -657,38 +657,49 @@ class PreheatScheduler extends IPSModule
             return [];
         }
 
-        $patterns = [];
+        $rules = [];
         foreach ($decoded as $entry) {
             if (!is_array($entry)) {
                 continue;
             }
-            $pattern = trim((string) ($entry['pattern'] ?? ''));
-            if ($pattern === '') {
+
+            if (array_key_exists('pattern', $entry)) {
+                if (!$this->legacyBlacklistWarningIssued) {
+                    $this->legacyBlacklistWarningIssued = true;
+                    $this->Log('Regex blacklist entries are no longer supported. Please update the blacklist configuration.');
+                }
                 continue;
             }
-            $patterns[] = $pattern;
+
+            $startsWith = trim((string) ($entry['starts_with'] ?? ''));
+            $endsWith = trim((string) ($entry['ends_with'] ?? ''));
+
+            if ($startsWith === '' && $endsWith === '') {
+                continue;
+            }
+
+            $rules[] = [
+                'starts_with' => $startsWith,
+                'ends_with'   => $endsWith
+            ];
         }
 
-        return $patterns;
+        return $rules;
     }
 
-    private function IsEventBlacklisted(array $event, array $patterns): bool
+    private function IsEventBlacklisted(array $event, array $rules): bool
     {
         $summary = (string) ($event['summary'] ?? '');
+        $summaryLower = mb_strtolower($summary);
 
-        foreach ($patterns as $pattern) {
-            if (isset($this->invalidBlacklistPatterns[$pattern])) {
-                continue;
-            }
+        foreach ($rules as $rule) {
+            $startsWith = mb_strtolower($rule['starts_with']);
+            $endsWith = mb_strtolower($rule['ends_with']);
 
-            $result = @preg_match($pattern, $summary);
-            if ($result === false) {
-                $this->invalidBlacklistPatterns[$pattern] = true;
-                $this->Log('Invalid blacklist pattern: ' . $pattern);
-                continue;
-            }
+            $matchesStart = $startsWith === '' || str_starts_with($summaryLower, $startsWith);
+            $matchesEnd = $endsWith === '' || str_ends_with($summaryLower, $endsWith);
 
-            if ($result === 1) {
+            if ($matchesStart && $matchesEnd) {
                 return true;
             }
         }
