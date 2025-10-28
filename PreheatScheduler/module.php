@@ -226,6 +226,13 @@ class PreheatScheduler extends IPSModule
             if ($event['end'] <= $now) {
                 continue;
             }
+            $isCancelled = isset($event['status']) && strtoupper((string) $event['status']) === 'CANCELLED';
+            if ($isCancelled) {
+                if ($event['start'] <= $horizon) {
+                    $upcomingEvents[] = $event;
+                }
+                continue;
+            }
             if ($event['start'] <= $now && $event['end'] > $now) {
                 if ($nextEvent === null || $event['start'] < $nextEvent['start']) {
                     $nextEvent = $event;
@@ -365,6 +372,7 @@ class PreheatScheduler extends IPSModule
         $start = null;
         $end = null;
         $summary = '';
+        $status = '';
 
         foreach ($lines as $line) {
             $upper = strtoupper($line);
@@ -385,6 +393,12 @@ class PreheatScheduler extends IPSModule
                 $summary = trim($this->UnescapeICSText($value));
                 continue;
             }
+
+            if (str_starts_with($upper, 'STATUS')) {
+                [, $value] = $this->SplitMetaValue($line);
+                $status = strtoupper(trim($this->UnescapeICSText($value)));
+                continue;
+            }
         }
 
         if ($start === null || $end === null) {
@@ -398,7 +412,8 @@ class PreheatScheduler extends IPSModule
         return [
             'start' => $start,
             'end'   => $end,
-            'summary' => $summary
+            'summary' => $summary,
+            'status' => $status
         ];
     }
 
@@ -516,7 +531,7 @@ class PreheatScheduler extends IPSModule
 
     private function BuildEventOverviewTable(array $events, int $now, ?string $errorMessage): string
     {
-        $table = "<table style='width: 100%; border-collapse: collapse;'><tr><td style='padding: 5px; font-weight: bold;'>Event Name</td><td style='padding: 5px; font-weight: bold;'>Event Start</td><td style='padding: 5px; font-weight: bold;'>Status</td></tr>";
+        $table = "<table style='width: 100%; border-collapse: collapse;'><tr><td style='padding: 5px; font-weight: bold;'>Event</td><td style='padding: 5px; font-weight: bold;'>Zeit</td><td style='padding: 5px; font-weight: bold;'>Status</td></tr>";
 
         if ($errorMessage !== null) {
             $table .= "<tr><td colspan='3' style='padding: 5px;'>" . htmlspecialchars($errorMessage) . '</td></tr>';
@@ -564,8 +579,12 @@ class PreheatScheduler extends IPSModule
                 $preheatStart = 0;
             }
 
+            $isCancelled = isset($event['status']) && strtoupper((string) $event['status']) === 'CANCELLED';
+
             $status = '';
-            if ($now >= $eventStart && $now < $eventEnd) {
+            if ($isCancelled) {
+                $status = 'Abgesagt - Keine Heizung';
+            } elseif ($now >= $eventStart && $now < $eventEnd) {
                 $status = 'Veranstaltung läuft // Temperatur wird gehalten';
             } elseif ($now >= $preheatStart && $now < $eventStart) {
                 $status = 'Vorheizen Aktiv';
@@ -576,9 +595,11 @@ class PreheatScheduler extends IPSModule
                 $status = '-';
             }
 
-            $table .= '<tr>'
+            $rowStyle = $isCancelled ? " style='color: #b30000;'" : '';
+
+            $table .= '<tr' . $rowStyle . '>'
                 . "<td style='padding: 5px;'>" . htmlspecialchars($summary) . '</td>'
-                . "<td style='padding: 5px;'>" . htmlspecialchars($this->FormatEventDate($eventStart)) . '</td>'
+                . "<td style='padding: 5px;'>" . htmlspecialchars($this->FormatEventDate($eventStart, $eventEnd)) . '</td>'
                 . "<td style='padding: 5px;'>" . htmlspecialchars($status) . '</td>'
                 . '</tr>';
         }
@@ -590,7 +611,7 @@ class PreheatScheduler extends IPSModule
         return $table . '</table>';
     }
 
-    private function FormatEventDate(int $timestamp): string
+    private function FormatEventDate(int $startTimestamp, int $endTimestamp): string
     {
         $days = ['Sonntag', 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag'];
         $months = [
@@ -608,19 +629,26 @@ class PreheatScheduler extends IPSModule
             12 => 'Dezember'
         ];
 
-        $dayName = $days[(int) date('w', $timestamp)];
-        $day = (int) date('j', $timestamp);
-        $month = $months[(int) date('n', $timestamp)] ?? '';
-        $hour = (int) date('G', $timestamp);
-        $minute = (int) date('i', $timestamp);
+        $dayName = $days[(int) date('w', $startTimestamp)];
+        $day = (int) date('j', $startTimestamp);
+        $month = $months[(int) date('n', $startTimestamp)] ?? '';
 
-        return sprintf('%s %d. %s %02d:%02d', $dayName, $day, $month, $hour, $minute);
+        $startHour = (int) date('G', $startTimestamp);
+        $startMinute = (int) date('i', $startTimestamp);
+        $endHour = (int) date('G', $endTimestamp);
+        $endMinute = (int) date('i', $endTimestamp);
+
+        return sprintf('%s %d. %s %02d:%02d-%02d:%02d', $dayName, $day, $month, $startHour, $startMinute, $endHour, $endMinute);
     }
 
     private function FormatCountdown(int $seconds): string
     {
         if ($seconds < 0) {
             $seconds = 0;
+        }
+        if ($seconds >= 86400) {
+            $days = (int) ceil($seconds / 86400);
+            return sprintf('Heizstart in %d Tagen', $days);
         }
         $hours = intdiv($seconds, 3600);
         $minutes = intdiv($seconds % 3600, 60);
