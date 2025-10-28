@@ -318,7 +318,6 @@ class PreheatScheduler extends IPSModule
         }
 
         $unfolded = [];
-        $summary = null;
         foreach ($lines as $line) {
             if ($line === '') {
                 $unfolded[] = '';
@@ -365,19 +364,26 @@ class PreheatScheduler extends IPSModule
     {
         $start = null;
         $end = null;
+        $summary = '';
+
         foreach ($lines as $line) {
             $upper = strtoupper($line);
             if (str_starts_with($upper, 'DTSTART')) {
                 [$meta, $value] = $this->SplitMetaValue($line);
                 $start = $this->ParseICSTime($meta, $value);
-            } elseif (str_starts_with($upper, 'DTEND')) {
+                continue;
+            }
+
+            if (str_starts_with($upper, 'DTEND')) {
                 [$meta, $value] = $this->SplitMetaValue($line);
                 $end = $this->ParseICSTime($meta, $value);
-            } elseif (str_starts_with($upper, 'SUMMARY')) {
+                continue;
+            }
+
+            if (str_starts_with($upper, 'SUMMARY')) {
                 [, $value] = $this->SplitMetaValue($line);
-                $summary = trim($value);
-            } elseif ($start !== null && $end !== null) {
-                break;
+                $summary = trim($this->UnescapeICSText($value));
+                continue;
             }
         }
 
@@ -392,7 +398,7 @@ class PreheatScheduler extends IPSModule
         return [
             'start' => $start,
             'end'   => $end,
-            'summary' => $summary ?? ''
+            'summary' => $summary
         ];
     }
 
@@ -402,6 +408,14 @@ class PreheatScheduler extends IPSModule
         $meta = $parts[0] ?? '';
         $value = $parts[1] ?? '';
         return [$meta, $value];
+    }
+
+    private function UnescapeICSText(string $value): string
+    {
+        $value = str_replace(['\\n', '\\N'], "\n", $value);
+        $value = str_replace('\\,', ',', $value);
+        $value = str_replace('\\;', ';', $value);
+        return str_replace('\\\\', '\\', $value);
     }
 
     private function ParseICSTime(string $meta, string $value): ?int
