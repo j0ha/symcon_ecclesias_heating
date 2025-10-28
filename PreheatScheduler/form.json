@@ -70,6 +70,34 @@
           "value": 1
         }
       ]
+    },
+    {
+      "type": "List",
+      "name": "EventBlacklist",
+      "caption": "Event blacklist",
+      "rowCount": 5,
+      "add": true,
+      "delete": true,
+      "columns": [
+        {
+          "caption": "Starts with",
+          "name": "starts_with",
+          "width": "280px",
+          "add": "",
+          "edit": {
+            "type": "ValidationTextBox"
+          }
+        },
+        {
+          "caption": "Ends with",
+          "name": "ends_with",
+          "width": "280px",
+          "add": "",
+          "edit": {
+            "type": "ValidationTextBox"
+          }
+        }
+      ]
     }
   ],
   "actions": [

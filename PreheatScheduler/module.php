@@ -8,6 +8,8 @@ class PreheatScheduler extends IPSModule
     private const STATUS_URL_ERROR = 201;
     private const STATUS_AUTH_ERROR = 202;
 
+    private bool $legacyBlacklistWarningIssued = false;
+
     public function Create()
     {
         parent::Create();
@@ -22,6 +24,7 @@ class PreheatScheduler extends IPSModule
         $this->RegisterPropertyInteger('PreheatBufferMin', 0);
         $this->RegisterPropertyInteger('EvaluationIntervalSec', 60);
         $this->RegisterPropertyInteger('HoldStrategy', 0);
+        $this->RegisterPropertyString('EventBlacklist', '[]');
 
         $heatingVarID = $this->RegisterVariableBoolean('HeatingDemand', $this->Translate('Heating Demand'));
         IPS_SetVariableCustomProfile($heatingVarID, '~Switch');
@@ -204,6 +207,7 @@ class PreheatScheduler extends IPSModule
         }
 
         $events = $this->ParseICSEvents($content);
+        $events = $this->FilterBlacklistedEvents($events);
         if (empty($events)) {
             $this->Log('No events found in calendar export.');
             $this->WriteAttributeInteger('LastEventStart', 0);
@@ -538,6 +542,8 @@ class PreheatScheduler extends IPSModule
             return $table . '</table>';
         }
 
+        $events = $this->FilterBlacklistedEvents($events);
+
         $tempVarID = $this->ReadPropertyInteger('TempVarID');
         $currentTemp = null;
         if ($tempVarID > 0 && IPS_VariableExists($tempVarID)) {
@@ -609,6 +615,94 @@ class PreheatScheduler extends IPSModule
         }
 
         return $table . '</table>';
+    }
+
+    private function FilterBlacklistedEvents(array $events): array
+    {
+        $rules = $this->GetBlacklistRules();
+        if (empty($rules)) {
+            return $events;
+        }
+
+        $filtered = [];
+        foreach ($events as $event) {
+            if (!is_array($event)) {
+                continue;
+            }
+            if ($this->IsEventBlacklisted($event, $rules)) {
+                continue;
+            }
+            $filtered[] = $event;
+        }
+
+        return $filtered;
+    }
+
+    private function GetBlacklistRules(): array
+    {
+        $raw = $this->ReadPropertyString('EventBlacklist');
+        if ($raw === '') {
+            return [];
+        }
+
+        $decoded = json_decode($raw, true);
+        if ($decoded === null && json_last_error() !== JSON_ERROR_NONE) {
+            $this->Log('Unable to decode event blacklist: ' . json_last_error_msg());
+            return [];
+        }
+
+        if (!is_array($decoded)) {
+            return [];
+        }
+
+        $rules = [];
+        foreach ($decoded as $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+
+            if (array_key_exists('pattern', $entry)) {
+                if (!$this->legacyBlacklistWarningIssued) {
+                    $this->legacyBlacklistWarningIssued = true;
+                    $this->Log('Regex blacklist entries are no longer supported. Please update the blacklist configuration.');
+                }
+                continue;
+            }
+
+            $startsWith = trim((string) ($entry['starts_with'] ?? ''));
+            $endsWith = trim((string) ($entry['ends_with'] ?? ''));
+
+            if ($startsWith === '' && $endsWith === '') {
+                continue;
+            }
+
+            $rules[] = [
+                'starts_with' => $startsWith,
+                'ends_with'   => $endsWith
+            ];
+        }
+
+        return $rules;
+    }
+
+    private function IsEventBlacklisted(array $event, array $rules): bool
+    {
+        $summary = (string) ($event['summary'] ?? '');
+        $summaryLower = mb_strtolower($summary);
+
+        foreach ($rules as $rule) {
+            $startsWith = mb_strtolower($rule['starts_with']);
+            $endsWith = mb_strtolower($rule['ends_with']);
+
+            $matchesStart = $startsWith === '' || str_starts_with($summaryLower, $startsWith);
+            $matchesEnd = $endsWith === '' || str_ends_with($summaryLower, $endsWith);
+
+            if ($matchesStart && $matchesEnd) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function FormatEventDate(int $startTimestamp, int $endTimestamp): string
