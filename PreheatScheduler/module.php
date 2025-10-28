@@ -52,6 +52,8 @@ class PreheatScheduler extends IPSModule
     {
         parent::ApplyChanges();
 
+        $this->invalidBlacklistPatterns = [];
+
         $interval = max(15, $this->ReadPropertyInteger('EvaluationIntervalSec'));
         $this->SetTimerInterval('Evaluate', $interval * 1000);
 
