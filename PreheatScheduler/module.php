@@ -31,7 +31,7 @@ class PreheatScheduler extends IPSModule
         $nextPreheatVarID = $this->RegisterVariableString('NextPreheatStartISO', $this->Translate('Next Preheat Start'));
         IPS_SetVariableCustomProfile($nextPreheatVarID, '~String');
         $upcomingEventsVarID = $this->RegisterVariableString('UpcomingEventsHTML', $this->Translate('Upcoming Events'));
-        IPS_SetVariableCustomProfile($upcomingEventsVarID, '~HTMLBox');
+        $this->AssignHTMLProfile($upcomingEventsVarID);
 
         $this->SetValue('HeatingDemand', false);
         $this->SetValue('NextEventStartISO', '-');
@@ -45,6 +45,25 @@ class PreheatScheduler extends IPSModule
         $this->RegisterAttributeInteger('LastEventEnd', 0);
         $this->RegisterAttributeInteger('LastPreheatStart', 0);
         $this->RegisterAttributeString('LastEventSummary', '');
+    }
+
+    private function AssignHTMLProfile(int $variableID): void
+    {
+        $profile = '~HTMLBox';
+        if (!IPS_VariableProfileExists($profile)) {
+            $fallback = '~TextBox';
+            if (IPS_VariableProfileExists($fallback)) {
+                $profile = $fallback;
+                $this->Log('HTMLBox profile not available. Falling back to ~TextBox.');
+            } else {
+                $profile = '';
+                $this->Log('HTMLBox profile not available and no fallback profile found.');
+            }
+        }
+
+        if ($profile !== '') {
+            IPS_SetVariableCustomProfile($variableID, $profile);
+        }
     }
 
     public function ApplyChanges()
@@ -430,16 +449,10 @@ class PreheatScheduler extends IPSModule
             $form['actions'] = [];
         }
 
-        if ($this->SupportsHtmlBoxInConfigurationForm()) {
-            foreach ($form['actions'] as $index => $action) {
-                if (($action['name'] ?? '') === 'UpcomingEventsPlaceholder') {
-                    $form['actions'][$index] = [
-                        'type'    => 'HTMLBox',
-                        'caption' => $this->Translate('Upcoming events'),
-                        'html'    => '{{GetValueString(IPS_GetObjectIDByIdent("UpcomingEventsHTML", $id))}}'
-                    ];
-                    break;
-                }
+        foreach ($form['actions'] as $index => $action) {
+            if (($action['name'] ?? '') === 'UpcomingEventsPlaceholder') {
+                $form['actions'][$index] = $this->BuildUpcomingEventsPreviewAction();
+                break;
             }
         }
 
@@ -452,6 +465,22 @@ class PreheatScheduler extends IPSModule
         return $json;
     }
 
+    private function BuildUpcomingEventsPreviewAction(): array
+    {
+        if ($this->SupportsHtmlBoxInConfigurationForm()) {
+            return [
+                'type'    => 'HTMLBox',
+                'caption' => $this->Translate('Upcoming events'),
+                'html'    => '{{GetValueString(IPS_GetObjectIDByIdent("UpcomingEventsHTML", $id))}}'
+            ];
+        }
+
+        return [
+            'type'    => 'Label',
+            'caption' => $this->BuildUpcomingEventsPreviewText()
+        ];
+    }
+
     private function SupportsHtmlBoxInConfigurationForm(): bool
     {
         $version = IPS_GetKernelVersion();
@@ -459,9 +488,13 @@ class PreheatScheduler extends IPSModule
             return false;
         }
 
-        $parts = explode('.', $version);
-        $major = (int) ($parts[0] ?? 0);
-        $minor = (int) ($parts[1] ?? 0);
+        if (!preg_match('/^(\d+)\.(\d+)/', $version, $matches)) {
+            $this->Log('Unable to determine HTMLBox support because kernel version "' . $version . '" does not match the expected pattern.');
+            return false;
+        }
+
+        $major = (int) $matches[1];
+        $minor = (int) $matches[2];
 
         if ($major > 7) {
             return true;
@@ -472,6 +505,87 @@ class PreheatScheduler extends IPSModule
         }
 
         return false;
+    }
+
+    private function BuildUpcomingEventsPreviewText(): string
+    {
+        $intro = $this->Translate('Upcoming events preview:');
+        $variableID = @IPS_GetObjectIDByIdent('UpcomingEventsHTML', $this->InstanceID);
+        if ($variableID === false) {
+            return $intro . PHP_EOL . $this->Translate('No upcoming events available.');
+        }
+
+        $html = GetValueString($variableID);
+        $lines = $this->ExtractUpcomingEventLinesFromHtml($html);
+        if (empty($lines)) {
+            $lines[] = $this->Translate('No upcoming events');
+        }
+
+        return $intro . PHP_EOL . implode(PHP_EOL, $lines);
+    }
+
+    private function ExtractUpcomingEventLinesFromHtml(string $html): array
+    {
+        if ($html === '') {
+            return [];
+        }
+
+        if (!preg_match_all('/<tr>(.*?)<\/tr>/is', $html, $rowMatches)) {
+            return [];
+        }
+
+        $rows = [];
+        foreach ($rowMatches[1] as $rowContent) {
+            if (!preg_match_all('/<(?:td|th)[^>]*>(.*?)<\/(?:td|th)>/is', $rowContent, $cellMatches)) {
+                continue;
+            }
+
+            $cells = [];
+            foreach ($cellMatches[1] as $cellContent) {
+                $text = trim(html_entity_decode(strip_tags($cellContent), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'));
+                if ($text !== '') {
+                    $cells[] = $text;
+                }
+            }
+
+            if (!empty($cells)) {
+                $rows[] = $cells;
+            }
+        }
+
+        if (count($rows) <= 1) {
+            return [];
+        }
+
+        $bodyRows = array_slice($rows, 1);
+        $lines = [];
+        foreach ($bodyRows as $cells) {
+            if (count($cells) === 1) {
+                $lines[] = $cells[0];
+                continue;
+            }
+
+            $summary = $cells[0] ?? '';
+            $start = $cells[1] ?? '';
+            $status = $cells[2] ?? '';
+
+            $parts = array_filter([$summary, $start], static function (string $value): bool {
+                return $value !== '';
+            });
+
+            if (empty($parts)) {
+                continue;
+            }
+
+            $line = implode(' — ', $parts);
+            if ($status !== '') {
+                $line .= ' (' . $status . ')';
+            }
+
+            $lines[] = $line;
+        }
+
+        return $lines;
     }
 
     private function SplitMetaValue(string $line): array
