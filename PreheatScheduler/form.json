@@ -70,6 +70,25 @@
           "value": 1
         }
       ]
+    },
+    {
+      "type": "List",
+      "name": "EventBlacklist",
+      "caption": "Event blacklist (regex)",
+      "rowCount": 5,
+      "add": true,
+      "delete": true,
+      "columns": [
+        {
+          "caption": "Pattern",
+          "name": "pattern",
+          "width": "600px",
+          "add": "",
+          "edit": {
+            "type": "ValidationTextBox"
+          }
+        }
+      ]
     }
   ],
   "actions": [
