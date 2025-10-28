@@ -8,6 +8,8 @@ class PreheatScheduler extends IPSModule
     private const STATUS_URL_ERROR = 201;
     private const STATUS_AUTH_ERROR = 202;
 
+    private array $invalidBlacklistPatterns = [];
+
     public function Create()
     {
         parent::Create();
@@ -22,6 +24,7 @@ class PreheatScheduler extends IPSModule
         $this->RegisterPropertyInteger('PreheatBufferMin', 0);
         $this->RegisterPropertyInteger('EvaluationIntervalSec', 60);
         $this->RegisterPropertyInteger('HoldStrategy', 0);
+        $this->RegisterPropertyString('EventBlacklist', '[]');
 
         $heatingVarID = $this->RegisterVariableBoolean('HeatingDemand', $this->Translate('Heating Demand'));
         IPS_SetVariableCustomProfile($heatingVarID, '~Switch');
@@ -48,6 +51,8 @@ class PreheatScheduler extends IPSModule
     public function ApplyChanges()
     {
         parent::ApplyChanges();
+
+        $this->invalidBlacklistPatterns = [];
 
         $interval = max(15, $this->ReadPropertyInteger('EvaluationIntervalSec'));
         $this->SetTimerInterval('Evaluate', $interval * 1000);
@@ -204,6 +209,7 @@ class PreheatScheduler extends IPSModule
         }
 
         $events = $this->ParseICSEvents($content);
+        $events = $this->FilterBlacklistedEvents($events);
         if (empty($events)) {
             $this->Log('No events found in calendar export.');
             $this->WriteAttributeInteger('LastEventStart', 0);
@@ -538,6 +544,8 @@ class PreheatScheduler extends IPSModule
             return $table . '</table>';
         }
 
+        $events = $this->FilterBlacklistedEvents($events);
+
         $tempVarID = $this->ReadPropertyInteger('TempVarID');
         $currentTemp = null;
         if ($tempVarID > 0 && IPS_VariableExists($tempVarID)) {
@@ -609,6 +617,83 @@ class PreheatScheduler extends IPSModule
         }
 
         return $table . '</table>';
+    }
+
+    private function FilterBlacklistedEvents(array $events): array
+    {
+        $patterns = $this->GetBlacklistPatterns();
+        if (empty($patterns)) {
+            return $events;
+        }
+
+        $filtered = [];
+        foreach ($events as $event) {
+            if (!is_array($event)) {
+                continue;
+            }
+            if ($this->IsEventBlacklisted($event, $patterns)) {
+                continue;
+            }
+            $filtered[] = $event;
+        }
+
+        return $filtered;
+    }
+
+    private function GetBlacklistPatterns(): array
+    {
+        $raw = $this->ReadPropertyString('EventBlacklist');
+        if ($raw === '') {
+            return [];
+        }
+
+        $decoded = json_decode($raw, true);
+        if ($decoded === null && json_last_error() !== JSON_ERROR_NONE) {
+            $this->Log('Unable to decode event blacklist: ' . json_last_error_msg());
+            return [];
+        }
+
+        if (!is_array($decoded)) {
+            return [];
+        }
+
+        $patterns = [];
+        foreach ($decoded as $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+            $pattern = trim((string) ($entry['pattern'] ?? ''));
+            if ($pattern === '') {
+                continue;
+            }
+            $patterns[] = $pattern;
+        }
+
+        return $patterns;
+    }
+
+    private function IsEventBlacklisted(array $event, array $patterns): bool
+    {
+        $summary = (string) ($event['summary'] ?? '');
+
+        foreach ($patterns as $pattern) {
+            if (isset($this->invalidBlacklistPatterns[$pattern])) {
+                continue;
+            }
+
+            $result = @preg_match($pattern, $summary);
+            if ($result === false) {
+                $this->invalidBlacklistPatterns[$pattern] = true;
+                $this->Log('Invalid blacklist pattern: ' . $pattern);
+                continue;
+            }
+
+            if ($result === 1) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function FormatEventDate(int $startTimestamp, int $endTimestamp): string
