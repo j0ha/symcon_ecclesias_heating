@@ -29,10 +29,13 @@ class PreheatScheduler extends IPSModule
         IPS_SetVariableCustomProfile($nextEventVarID, '~String');
         $nextPreheatVarID = $this->RegisterVariableString('NextPreheatStartISO', $this->Translate('Next Preheat Start'));
         IPS_SetVariableCustomProfile($nextPreheatVarID, '~String');
+        $overviewVarID = $this->RegisterVariableString('EventOverviewHTML', $this->Translate('Event Overview'));
+        IPS_SetVariableCustomProfile($overviewVarID, '~HTMLBox');
 
         $this->SetValue('HeatingDemand', false);
         $this->SetValue('NextEventStartISO', '-');
         $this->SetValue('NextPreheatStartISO', '-');
+        $this->SetValue('EventOverviewHTML', $this->BuildEventOverviewTable([], time(), $this->Translate('Keine Veranstaltungen verfügbar.')));
 
         $this->RegisterTimer('Evaluate', 0, 'HEAT_Recalculate($_IPS[\'TARGET\']);');
 
@@ -190,11 +193,13 @@ class PreheatScheduler extends IPSModule
         if ($calendarUrl === '') {
             $this->Log('Calendar URL is not configured.');
             $this->SetStatus(self::STATUS_URL_ERROR);
+            $this->UpdateEventOverview([], $now, $this->Translate('Kalender ist nicht konfiguriert.'));
             return $this->GetStoredEventForFallback($now);
         }
 
         $content = $this->FetchCalendarContent($calendarUrl);
         if ($content === null) {
+            $this->UpdateEventOverview([], $now, $this->Translate('Kalender konnte nicht geladen werden.'));
             return $this->GetStoredEventForFallback($now);
         }
 
@@ -205,6 +210,7 @@ class PreheatScheduler extends IPSModule
             $this->WriteAttributeInteger('LastEventEnd', 0);
             $this->WriteAttributeInteger('LastPreheatStart', 0);
             $this->SetStatus(self::STATUS_OK);
+            $this->UpdateEventOverview([], $now, $this->Translate('Keine Veranstaltungen gefunden.'));
             return null;
         }
 
@@ -212,6 +218,7 @@ class PreheatScheduler extends IPSModule
         $horizon = $now + $lookaheadSeconds;
 
         $nextEvent = null;
+        $upcomingEvents = [];
         foreach ($events as $event) {
             if (!isset($event['start'], $event['end'])) {
                 continue;
@@ -223,6 +230,7 @@ class PreheatScheduler extends IPSModule
                 if ($nextEvent === null || $event['start'] < $nextEvent['start']) {
                     $nextEvent = $event;
                 }
+                $upcomingEvents[] = $event;
                 continue;
             }
             if ($event['start'] > $horizon) {
@@ -232,8 +240,12 @@ class PreheatScheduler extends IPSModule
                 if ($nextEvent === null || $event['start'] < $nextEvent['start']) {
                     $nextEvent = $event;
                 }
+                $upcomingEvents[] = $event;
             }
         }
+
+        usort($upcomingEvents, static fn ($a, $b) => $a['start'] <=> $b['start']);
+        $this->UpdateEventOverview($upcomingEvents, $now, null);
 
         if ($nextEvent !== null) {
             $this->WriteAttributeInteger('LastEventStart', $nextEvent['start']);
@@ -306,6 +318,7 @@ class PreheatScheduler extends IPSModule
         }
 
         $unfolded = [];
+        $summary = null;
         foreach ($lines as $line) {
             if ($line === '') {
                 $unfolded[] = '';
@@ -360,6 +373,9 @@ class PreheatScheduler extends IPSModule
             } elseif (str_starts_with($upper, 'DTEND')) {
                 [$meta, $value] = $this->SplitMetaValue($line);
                 $end = $this->ParseICSTime($meta, $value);
+            } elseif (str_starts_with($upper, 'SUMMARY')) {
+                [, $value] = $this->SplitMetaValue($line);
+                $summary = trim($value);
             } elseif ($start !== null && $end !== null) {
                 break;
             }
@@ -375,7 +391,8 @@ class PreheatScheduler extends IPSModule
 
         return [
             'start' => $start,
-            'end'   => $end
+            'end'   => $end,
+            'summary' => $summary ?? ''
         ];
     }
 
@@ -475,5 +492,124 @@ class PreheatScheduler extends IPSModule
     private function Log(string $message): void
     {
         IPS_LogMessage('PreheatScheduler', sprintf('#%d %s', $this->InstanceID, $message));
+    }
+
+    private function UpdateEventOverview(array $events, int $now, ?string $errorMessage): void
+    {
+        $html = $this->BuildEventOverviewTable($events, $now, $errorMessage);
+        $this->SetValue('EventOverviewHTML', $html);
+    }
+
+    private function BuildEventOverviewTable(array $events, int $now, ?string $errorMessage): string
+    {
+        $table = "<table style='width: 100%; border-collapse: collapse;'><tr><td style='padding: 5px; font-weight: bold;'>Event Name</td><td style='padding: 5px; font-weight: bold;'>Event Start</td><td style='padding: 5px; font-weight: bold;'>Status</td></tr>";
+
+        if ($errorMessage !== null) {
+            $table .= "<tr><td colspan='3' style='padding: 5px;'>" . htmlspecialchars($errorMessage) . '</td></tr>';
+            return $table . '</table>';
+        }
+
+        $tempVarID = $this->ReadPropertyInteger('TempVarID');
+        $currentTemp = null;
+        if ($tempVarID > 0 && IPS_VariableExists($tempVarID)) {
+            $currentTemp = (float) GetValue($tempVarID);
+        }
+
+        $setpoint = $this->ReadPropertyFloat('SetpointWarm');
+        $heatingRate = $this->ReadPropertyFloat('HeatingRate');
+        $bufferSeconds = max(0, $this->ReadPropertyInteger('PreheatBufferMin')) * 60;
+
+        $rowsAdded = false;
+        foreach ($events as $event) {
+            if (!isset($event['start'], $event['end'])) {
+                continue;
+            }
+            if ($event['end'] <= $now) {
+                continue;
+            }
+            $rowsAdded = true;
+            $eventStart = (int) $event['start'];
+            $eventEnd = (int) $event['end'];
+            $summary = trim((string) ($event['summary'] ?? ''));
+            if ($summary === '') {
+                $summary = $this->Translate('Unbenannte Veranstaltung');
+            }
+
+            $preheatStart = max(0, $eventStart - $bufferSeconds);
+            if ($currentTemp !== null && $heatingRate > 0.0) {
+                $delta = $setpoint - $currentTemp;
+                if ($delta < 0.0) {
+                    $delta = 0.0;
+                }
+                $preheatDurationHours = $delta / $heatingRate;
+                $preheatSeconds = (int) round($preheatDurationHours * 3600);
+                $preheatStart = $eventStart - $preheatSeconds - $bufferSeconds;
+            }
+
+            if ($preheatStart < 0) {
+                $preheatStart = 0;
+            }
+
+            $status = '';
+            if ($now >= $eventStart && $now < $eventEnd) {
+                $status = 'Veranstaltung läuft // Temperatur wird gehalten';
+            } elseif ($now >= $preheatStart && $now < $eventStart) {
+                $status = 'Vorheizen Aktiv';
+            } elseif ($now < $preheatStart) {
+                $diff = $preheatStart - $now;
+                $status = $this->FormatCountdown($diff);
+            } else {
+                $status = '-';
+            }
+
+            $table .= '<tr>'
+                . "<td style='padding: 5px;'>" . htmlspecialchars($summary) . '</td>'
+                . "<td style='padding: 5px;'>" . htmlspecialchars($this->FormatEventDate($eventStart)) . '</td>'
+                . "<td style='padding: 5px;'>" . htmlspecialchars($status) . '</td>'
+                . '</tr>';
+        }
+
+        if (!$rowsAdded) {
+            $table .= "<tr><td colspan='3' style='padding: 5px;'>" . $this->Translate('Keine zukünftigen Veranstaltungen im Suchzeitraum.') . '</td></tr>';
+        }
+
+        return $table . '</table>';
+    }
+
+    private function FormatEventDate(int $timestamp): string
+    {
+        $days = ['Sonntag', 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag'];
+        $months = [
+            1 => 'Januar',
+            2 => 'Februar',
+            3 => 'März',
+            4 => 'April',
+            5 => 'Mai',
+            6 => 'Juni',
+            7 => 'Juli',
+            8 => 'August',
+            9 => 'September',
+            10 => 'Oktober',
+            11 => 'November',
+            12 => 'Dezember'
+        ];
+
+        $dayName = $days[(int) date('w', $timestamp)];
+        $day = (int) date('j', $timestamp);
+        $month = $months[(int) date('n', $timestamp)] ?? '';
+        $hour = (int) date('G', $timestamp);
+        $minute = (int) date('i', $timestamp);
+
+        return sprintf('%s %d. %s %02d:%02d', $dayName, $day, $month, $hour, $minute);
+    }
+
+    private function FormatCountdown(int $seconds): string
+    {
+        if ($seconds < 0) {
+            $seconds = 0;
+        }
+        $hours = intdiv($seconds, 3600);
+        $minutes = intdiv($seconds % 3600, 60);
+        return sprintf('Heizstart in %d Std %d Min', $hours, $minutes);
     }
 }
