@@ -385,6 +385,8 @@ class PreheatScheduler extends IPSModule
         $rrule = '';
         $rdates = [];
         $exdates = [];
+        $uid = '';
+        $recurrenceId = null;
 
         foreach ($lines as $line) {
             $upper = strtoupper($line);
@@ -409,6 +411,18 @@ class PreheatScheduler extends IPSModule
             if (str_starts_with($upper, 'STATUS')) {
                 [, $value] = $this->SplitMetaValue($line);
                 $status = strtoupper(trim($this->UnescapeICSText($value)));
+                continue;
+            }
+
+            if (str_starts_with($upper, 'UID')) {
+                [, $value] = $this->SplitMetaValue($line);
+                $uid = trim($this->UnescapeICSText($value));
+                continue;
+            }
+
+            if (str_starts_with($upper, 'RECURRENCE-ID')) {
+                [$meta, $value] = $this->SplitMetaValue($line);
+                $recurrenceId = $this->ParseICSTime($meta, $value);
                 continue;
             }
 
@@ -447,7 +461,9 @@ class PreheatScheduler extends IPSModule
             'timezone' => $timezone,
             'rrule' => $rrule,
             'rdates' => $rdates,
-            'exdates' => $exdates
+            'exdates' => $exdates,
+            'uid' => $uid,
+            'recurrence_id' => $recurrenceId
         ];
     }
 
@@ -693,6 +709,30 @@ class PreheatScheduler extends IPSModule
     {
         $expanded = [];
 
+        $cancelledOccurrences = [];
+        $cancelledSeries = [];
+
+        foreach ($events as $event) {
+            if (!is_array($event)) {
+                continue;
+            }
+
+            $uid = is_string($event['uid'] ?? null) ? trim($event['uid']) : '';
+            $recurrenceId = isset($event['recurrence_id']) && is_int($event['recurrence_id']) ? $event['recurrence_id'] : null;
+            $isCancelled = isset($event['status']) && strtoupper((string) $event['status']) === 'CANCELLED';
+
+            if ($isCancelled && $uid !== '') {
+                if ($recurrenceId !== null) {
+                    if (!isset($cancelledOccurrences[$uid])) {
+                        $cancelledOccurrences[$uid] = [];
+                    }
+                    $cancelledOccurrences[$uid][$recurrenceId] = true;
+                } else {
+                    $cancelledSeries[$uid] = true;
+                }
+            }
+        }
+
         foreach ($events as $event) {
             if (!isset($event['start'], $event['end'])) {
                 continue;
@@ -700,6 +740,20 @@ class PreheatScheduler extends IPSModule
 
             $duration = (int) $event['end'] - (int) $event['start'];
             if ($duration <= 0) {
+                continue;
+            }
+
+            $uid = is_string($event['uid'] ?? null) ? trim($event['uid']) : '';
+            $isCancelled = isset($event['status']) && strtoupper((string) $event['status']) === 'CANCELLED';
+
+            if ($isCancelled) {
+                if ($event['end'] > $windowStart && $event['start'] <= $windowEnd) {
+                    $expanded[] = $event;
+                }
+                continue;
+            }
+
+            if ($uid !== '' && isset($cancelledSeries[$uid])) {
                 continue;
             }
 
@@ -740,6 +794,10 @@ class PreheatScheduler extends IPSModule
 
             foreach ($occurrenceStarts as $startTimestamp) {
                 if (in_array($startTimestamp, $exdates, true)) {
+                    continue;
+                }
+
+                if ($uid !== '' && isset($cancelledOccurrences[$uid][$startTimestamp])) {
                     continue;
                 }
 
