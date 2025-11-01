@@ -154,7 +154,7 @@ class PreheatScheduler extends IPSModule
             }
 
             if (!$shouldBeOn && $currentlyOn) {
-                if ($holdStrategy === 0 && $now < $eventEnd) {
+                if ($holdStrategy === 0 && $now >= $eventStart && $now < $eventEnd) {
                     $shouldBeOn = true;
                 }
             }
