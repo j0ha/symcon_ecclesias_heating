@@ -46,6 +46,7 @@ class PreheatScheduler extends IPSModule
         $this->RegisterAttributeInteger('LastEventStart', 0);
         $this->RegisterAttributeInteger('LastEventEnd', 0);
         $this->RegisterAttributeInteger('LastPreheatStart', 0);
+        $this->RegisterAttributeInteger('DemandHoldUntil', 0);
     }
 
     public function ApplyChanges()
@@ -109,15 +110,18 @@ class PreheatScheduler extends IPSModule
 
         $heatingVarID = $this->GetIDForIdent('HeatingDemand');
         $currentlyOn = GetValueBoolean($heatingVarID);
+        $demandHoldUntil = $this->ReadAttributeInteger('DemandHoldUntil');
 
         $shouldBeOn = false;
         $eventStartISO = '-';
         $preheatStartISO = '-';
+        $activeEventEnd = null;
 
         if ($event !== null) {
             $eventStart = $event['start'];
             $eventEnd = $event['end'];
             $eventStartISO = date('c', $eventStart);
+            $activeEventEnd = $eventEnd;
 
             $preheatStart = max(0, $eventStart - $bufferSeconds);
 
@@ -161,6 +165,7 @@ class PreheatScheduler extends IPSModule
         } else {
             $stored = $this->GetStoredEvent();
             if ($stored !== null) {
+                $activeEventEnd = $stored['end'];
                 if ($now < $stored['end']) {
                     if ($currentlyOn) {
                         $shouldBeOn = true;
@@ -169,11 +174,25 @@ class PreheatScheduler extends IPSModule
             }
         }
 
+        if ($currentlyOn && !$shouldBeOn && $demandHoldUntil > $now) {
+            $shouldBeOn = true;
+        }
+
         $this->SetValue('NextEventStartISO', $eventStartISO);
         $this->SetValue('NextPreheatStartISO', $preheatStartISO);
 
         if ($shouldBeOn !== $currentlyOn) {
             $this->SetValue('HeatingDemand', $shouldBeOn);
+        }
+
+        if ($shouldBeOn) {
+            if ($activeEventEnd !== null && $activeEventEnd !== $demandHoldUntil) {
+                $this->WriteAttributeInteger('DemandHoldUntil', $activeEventEnd);
+            }
+        } else {
+            if ($demandHoldUntil !== 0 && $demandHoldUntil <= $now) {
+                $this->WriteAttributeInteger('DemandHoldUntil', 0);
+            }
         }
 
         return $shouldBeOn;
