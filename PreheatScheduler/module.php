@@ -45,6 +45,7 @@ class PreheatScheduler extends IPSModule
         $this->RegisterAttributeInteger('LastEventEnd', 0);
         $this->RegisterAttributeInteger('LastPreheatStart', 0);
         $this->RegisterAttributeString('LastEventSummary', '');
+        $this->RegisterAttributeInteger('HeatingHoldUntil', 0);
     }
 
     private function AssignHTMLProfile(int $variableID): void
@@ -130,11 +131,14 @@ class PreheatScheduler extends IPSModule
         $shouldBeOn = false;
         $eventStartISO = '-';
         $preheatStartISO = '-';
+        $holdUntil = $this->ReadAttributeInteger('HeatingHoldUntil');
+        $targetHoldEnd = null;
 
         if ($event !== null) {
             $eventStart = $event['start'];
             $eventEnd = $event['end'];
             $eventStartISO = date('c', $eventStart);
+            $targetHoldEnd = $eventEnd;
 
             $preheatStart = $this->CalculatePreheatStart($eventStart, $setpoint, $heatingRate, $currentTemp, $bufferSeconds);
             if ($heatingRate <= 0.0) {
@@ -168,8 +172,25 @@ class PreheatScheduler extends IPSModule
                 if ($now < $stored['end']) {
                     if ($currentlyOn) {
                         $shouldBeOn = true;
+                        $targetHoldEnd = $stored['end'];
                     }
                 }
+            }
+        }
+
+        if ($shouldBeOn) {
+            if ($targetHoldEnd !== null) {
+                if ($holdUntil !== $targetHoldEnd) {
+                    $this->WriteAttributeInteger('HeatingHoldUntil', $targetHoldEnd);
+                    $holdUntil = $targetHoldEnd;
+                }
+            }
+        } else {
+            if ($holdUntil > $now) {
+                $shouldBeOn = true;
+            } elseif ($holdUntil !== 0) {
+                $this->WriteAttributeInteger('HeatingHoldUntil', 0);
+                $holdUntil = 0;
             }
         }
 
