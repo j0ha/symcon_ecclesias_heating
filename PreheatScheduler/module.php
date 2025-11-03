@@ -641,6 +641,11 @@ class PreheatScheduler extends IPSModule
         $bufferSeconds = max(0, $this->ReadPropertyInteger('PreheatBufferMin')) * 60;
 
         $rowsAdded = false;
+
+        $heatingVarID = $this->GetIDForIdent('HeatingDemand');
+        $heatingActive = GetValueBoolean($heatingVarID);
+        $trackedEventStart = $this->ReadAttributeInteger('LastEventStart');
+        $demandHoldUntil = $this->ReadAttributeInteger('DemandHoldUntil');
         foreach ($events as $event) {
             if (!isset($event['start'], $event['end'])) {
                 continue;
@@ -678,6 +683,15 @@ class PreheatScheduler extends IPSModule
                 $status = 'Abgesagt - Keine Heizung';
             } elseif ($now >= $eventStart && $now < $eventEnd) {
                 $status = 'Veranstaltung läuft // Temperatur wird gehalten';
+            } elseif (
+                $heatingActive
+                && $trackedEventStart > 0
+                && $trackedEventStart === $eventStart
+                && $demandHoldUntil > $now
+                && !$isCancelled
+                && $now < $eventStart
+            ) {
+                $status = 'Vorheizen Aktiv';
             } elseif ($now >= $preheatStart && $now < $eventStart) {
                 $status = 'Vorheizen Aktiv';
             } elseif ($now < $preheatStart) {
