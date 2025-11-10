@@ -53,22 +53,32 @@ class PreheatScheduler extends IPSModule
     {
         parent::ApplyChanges();
 
+        $this->Debug('ApplyChanges', 'Starting apply changes');
+
         $this->invalidBlacklistPatterns = [];
 
         $interval = max(15, $this->ReadPropertyInteger('EvaluationIntervalSec'));
         $this->SetTimerInterval('Evaluate', $interval * 1000);
 
+        $this->Debug('ApplyChanges', sprintf('Timer interval set to %d seconds', $interval));
+
         $tempVarID = $this->ReadPropertyInteger('TempVarID');
         $lastRegistered = $this->ReadAttributeInteger('RegisteredTempVarID');
 
+        $this->Debug('ApplyChanges', sprintf('Temperature variable configured: %d (last registered %d)', $tempVarID, $lastRegistered));
+
         if ($lastRegistered > 0 && $lastRegistered !== $tempVarID) {
+            $this->Debug('ApplyChanges', sprintf('Unregistering previous temp var ID %d', $lastRegistered));
             $this->UnregisterMessage($lastRegistered, VM_UPDATE);
             $this->WriteAttributeInteger('RegisteredTempVarID', 0);
         }
 
         if ($tempVarID > 0 && IPS_VariableExists($tempVarID)) {
+            $this->Debug('ApplyChanges', sprintf('Registering update message for temp var ID %d', $tempVarID));
             $this->RegisterMessage($tempVarID, VM_UPDATE);
             $this->WriteAttributeInteger('RegisteredTempVarID', $tempVarID);
+        } else {
+            $this->Debug('ApplyChanges', sprintf('Temperature variable %d not registered or missing', $tempVarID));
         }
 
         $this->Recalculate();
@@ -76,9 +86,11 @@ class PreheatScheduler extends IPSModule
 
     public function MessageSink($TimeStamp, $SenderID, $Message, $Data)
     {
+        $this->Debug('MessageSink', sprintf('Message received: sender=%d message=%d timestamp=%d', $SenderID, $Message, $TimeStamp));
         if ($Message === VM_UPDATE) {
             $tempVarID = $this->ReadPropertyInteger('TempVarID');
             if ($SenderID === $tempVarID) {
+                $this->Debug('MessageSink', 'Temperature variable update detected, recalculating');
                 $this->Recalculate();
             }
         }
@@ -86,31 +98,43 @@ class PreheatScheduler extends IPSModule
 
     public function Recalculate(): bool
     {
+        $this->Debug('Recalculate', 'Recalculation started');
         $now = time();
+        $this->Debug('Recalculate', sprintf('Current timestamp: %d', $now));
         $event = $this->DetermineNextEvent($now);
+        $this->Debug('Recalculate', $event === null ? 'No upcoming event detected' : 'Upcoming event detected');
+
         $holdStrategy = $this->ReadPropertyInteger('HoldStrategy');
+        $this->Debug('Recalculate', sprintf('Hold strategy: %d', $holdStrategy));
 
         $tempVarID = $this->ReadPropertyInteger('TempVarID');
         $currentTemp = null;
         if ($tempVarID > 0 && IPS_VariableExists($tempVarID)) {
             $currentTemp = (float) GetValue($tempVarID);
+            $this->Debug('Recalculate', sprintf('Current temperature: %.2f', $currentTemp));
         }
 
         if ($currentTemp === null) {
             $this->Log('Temperature variable not set or missing.');
+            $this->Debug('Recalculate', 'Temperature variable not set or missing');
         }
 
         $setpoint = $this->ReadPropertyFloat('SetpointWarm');
         $heatingRate = $this->ReadPropertyFloat('HeatingRate');
+        $this->Debug('Recalculate', sprintf('Setpoint: %.2f Heating rate: %.2f', $setpoint, $heatingRate));
         if ($heatingRate <= 0.0) {
             $this->Log('Heating rate must be greater than zero.');
+            $this->Debug('Recalculate', 'Heating rate must be greater than zero');
         }
 
         $bufferSeconds = max(0, $this->ReadPropertyInteger('PreheatBufferMin')) * 60;
+        $this->Debug('Recalculate', sprintf('Preheat buffer (seconds): %d', $bufferSeconds));
 
         $heatingVarID = $this->GetIDForIdent('HeatingDemand');
         $currentlyOn = GetValueBoolean($heatingVarID);
         $demandHoldUntil = $this->ReadAttributeInteger('DemandHoldUntil');
+
+        $this->Debug('Recalculate', sprintf('Heating currently on: %s, demand hold until: %d', $currentlyOn ? 'true' : 'false', $demandHoldUntil));
 
         $shouldBeOn = false;
         $eventStartISO = '-';
@@ -123,6 +147,8 @@ class PreheatScheduler extends IPSModule
             $eventStartISO = date('c', $eventStart);
             $activeEventEnd = $eventEnd;
 
+            $this->Debug('Recalculate', sprintf('Processing event: start=%d end=%d', $eventStart, $eventEnd));
+
             $preheatStart = max(0, $eventStart - $bufferSeconds);
 
             if ($currentTemp !== null && $heatingRate > 0.0) {
@@ -133,8 +159,10 @@ class PreheatScheduler extends IPSModule
                 $preheatDurationHours = $delta / $heatingRate;
                 $preheatSeconds = (int) round($preheatDurationHours * 3600);
                 $preheatStart = $eventStart - $preheatSeconds - $bufferSeconds;
+                $this->Debug('Recalculate', sprintf('Calculated preheat start: %d (delta=%.2f, duration=%d)', $preheatStart, $delta, $preheatSeconds));
             } elseif ($heatingRate <= 0.0) {
                 $this->Log('Unable to calculate preheat start because heating rate is zero or negative.');
+                $this->Debug('Recalculate', 'Unable to calculate preheat start due to heating rate');
             }
 
             if ($preheatStart < 0) {
@@ -144,6 +172,8 @@ class PreheatScheduler extends IPSModule
             $this->WriteAttributeInteger('LastPreheatStart', $preheatStart);
             $preheatStartISO = $preheatStart > 0 ? date('c', $preheatStart) : '-';
 
+            $this->Debug('Recalculate', sprintf('Preheat start ISO: %s', $preheatStartISO));
+
             $windowEnd = $holdStrategy === 0 ? $eventEnd : $eventStart;
             if ($windowEnd < $eventStart) {
                 $windowEnd = $eventStart;
@@ -151,15 +181,18 @@ class PreheatScheduler extends IPSModule
 
             if ($now >= $preheatStart && $now < $windowEnd) {
                 $shouldBeOn = true;
+                $this->Debug('Recalculate', 'Heating should be on due to preheat window');
             }
 
             if ($now >= $eventStart && $now < $eventEnd) {
                 $shouldBeOn = true;
+                $this->Debug('Recalculate', 'Heating should be on due to active event');
             }
 
             if (!$shouldBeOn && $currentlyOn) {
                 if ($holdStrategy === 0 && $now >= $eventStart && $now < $eventEnd) {
                     $shouldBeOn = true;
+                    $this->Debug('Recalculate', 'Maintaining heating due to hold strategy');
                 }
             }
         } else {
@@ -169,6 +202,7 @@ class PreheatScheduler extends IPSModule
                 if ($now < $stored['end']) {
                     if ($currentlyOn) {
                         $shouldBeOn = true;
+                        $this->Debug('Recalculate', 'Continuing heating due to stored event');
                     }
                 }
             }
@@ -176,6 +210,7 @@ class PreheatScheduler extends IPSModule
 
         if ($currentlyOn && !$shouldBeOn && $demandHoldUntil > $now) {
             $shouldBeOn = true;
+            $this->Debug('Recalculate', 'Demand hold is keeping heating on');
         }
 
         $this->SetValue('NextEventStartISO', $eventStartISO);
@@ -183,18 +218,22 @@ class PreheatScheduler extends IPSModule
 
         if ($shouldBeOn !== $currentlyOn) {
             $this->SetValue('HeatingDemand', $shouldBeOn);
+            $this->Debug('Recalculate', sprintf('Heating demand toggled to %s', $shouldBeOn ? 'true' : 'false'));
         }
 
         if ($shouldBeOn) {
             if ($activeEventEnd !== null && $activeEventEnd !== $demandHoldUntil) {
                 $this->WriteAttributeInteger('DemandHoldUntil', $activeEventEnd);
+                $this->Debug('Recalculate', sprintf('Demand hold updated to %d', $activeEventEnd));
             }
         } else {
             if ($demandHoldUntil !== 0 && $demandHoldUntil <= $now) {
                 $this->WriteAttributeInteger('DemandHoldUntil', 0);
+                $this->Debug('Recalculate', 'Demand hold reset');
             }
         }
 
+        $this->Debug('Recalculate', sprintf('Recalculation finished, heating demand: %s', $shouldBeOn ? 'true' : 'false'));
         return $shouldBeOn;
     }
 
@@ -216,6 +255,7 @@ class PreheatScheduler extends IPSModule
         $calendarUrl = trim($this->ReadPropertyString('CalendarURL'));
         if ($calendarUrl === '') {
             $this->Log('Calendar URL is not configured.');
+            $this->Debug('DetermineNextEvent', 'Calendar URL missing');
             $this->SetStatus(self::STATUS_URL_ERROR);
             $this->UpdateEventOverview([], $now, $this->Translate('Kalender ist nicht konfiguriert.'));
             return $this->GetStoredEventForFallback($now);
@@ -223,14 +263,18 @@ class PreheatScheduler extends IPSModule
 
         $content = $this->FetchCalendarContent($calendarUrl);
         if ($content === null) {
+            $this->Debug('DetermineNextEvent', 'Calendar content fetch failed');
             $this->UpdateEventOverview([], $now, $this->Translate('Kalender konnte nicht geladen werden.'));
             return $this->GetStoredEventForFallback($now);
         }
 
         $events = $this->ParseICSEvents($content);
+        $this->Debug('DetermineNextEvent', sprintf('Parsed %d events', count($events)));
         $events = $this->FilterBlacklistedEvents($events);
+        $this->Debug('DetermineNextEvent', sprintf('Events after blacklist filter: %d', count($events)));
         if (empty($events)) {
             $this->Log('No events found in calendar export.');
+            $this->Debug('DetermineNextEvent', 'No events after filtering');
             $this->WriteAttributeInteger('LastEventStart', 0);
             $this->WriteAttributeInteger('LastEventEnd', 0);
             $this->WriteAttributeInteger('LastPreheatStart', 0);
@@ -243,6 +287,7 @@ class PreheatScheduler extends IPSModule
         $horizon = $now + $lookaheadSeconds;
 
         $events = $this->ExpandRecurringEvents($events, $now, $horizon);
+        $this->Debug('DetermineNextEvent', sprintf('Events after expansion: %d', count($events)));
 
         $nextEvent = null;
         $upcomingEvents = [];
@@ -265,6 +310,7 @@ class PreheatScheduler extends IPSModule
                     $nextEvent = $event;
                 }
                 $upcomingEvents[] = $event;
+                $this->Debug('DetermineNextEvent', sprintf('Active event detected: start=%d end=%d', $event['start'], $event['end']));
                 continue;
             }
             if ($event['start'] > $horizon) {
@@ -275,6 +321,7 @@ class PreheatScheduler extends IPSModule
                     $nextEvent = $event;
                 }
                 $upcomingEvents[] = $event;
+                $this->Debug('DetermineNextEvent', sprintf('Upcoming event queued: start=%d end=%d', $event['start'], $event['end']));
             }
         }
 
@@ -286,8 +333,10 @@ class PreheatScheduler extends IPSModule
             $this->WriteAttributeInteger('LastEventEnd', $nextEvent['end']);
             $this->WriteAttributeInteger('LastPreheatStart', 0);
             $this->SetStatus(self::STATUS_OK);
+            $this->Debug('DetermineNextEvent', sprintf('Next event selected: start=%d end=%d', $nextEvent['start'], $nextEvent['end']));
         } else {
             $this->SetStatus(self::STATUS_OK);
+            $this->Debug('DetermineNextEvent', 'No next event found');
         }
 
         return $nextEvent;
@@ -298,11 +347,14 @@ class PreheatScheduler extends IPSModule
         $user = $this->ReadPropertyString('CalUser');
         $pass = $this->ReadPropertyString('CalPass');
 
+        $this->Debug('FetchCalendar', sprintf('Fetching calendar from %s', $calendarUrl));
+
         $urlsToTry = [];
         $trimmed = rtrim($calendarUrl);
         if (!preg_match('/\.ics($|\?)/i', $trimmed) && !str_contains($trimmed, '?export')) {
             $separator = str_contains($trimmed, '?') ? '&' : '?';
             $urlsToTry[] = $trimmed . $separator . 'export';
+            $this->Debug('FetchCalendar', sprintf('Added export helper URL: %s', $trimmed . $separator . 'export'));
         }
         $urlsToTry[] = $trimmed;
 
@@ -310,6 +362,7 @@ class PreheatScheduler extends IPSModule
         if ($user !== '' || $pass !== '') {
             $auth['AuthUser'] = $user;
             $auth['AuthPass'] = $pass;
+            $this->Debug('FetchCalendar', 'Authentication configured for calendar fetch');
         }
 
         $lastError = '';
@@ -319,20 +372,25 @@ class PreheatScheduler extends IPSModule
             if ($content !== false && $content !== null) {
                 if ($url !== $trimmed) {
                     $this->Log('Calendar fetched using export helper URL: ' . $url);
+                    $this->Debug('FetchCalendar', sprintf('Calendar fetched via helper URL: %s', $url));
                 }
                 $this->SetStatus(self::STATUS_OK);
+                $this->Debug('FetchCalendar', 'Calendar content fetched successfully');
                 return $content;
             }
             $error = error_get_last();
             if ($error !== null) {
                 $lastError = $error['message'] ?? '';
+                $this->Debug('FetchCalendar', sprintf('Fetch attempt failed for %s: %s', $url, $lastError));
             }
         }
 
         if ($lastError !== '') {
             $this->Log('Calendar fetch failed: ' . $lastError);
+            $this->Debug('FetchCalendar', sprintf('Calendar fetch failed with error: %s', $lastError));
         } else {
             $this->Log('Calendar fetch failed: unknown error');
+            $this->Debug('FetchCalendar', 'Calendar fetch failed with unknown error');
         }
 
         if ($lastError !== '' && (stripos($lastError, '401') !== false || stripos($lastError, '403') !== false)) {
@@ -346,8 +404,10 @@ class PreheatScheduler extends IPSModule
 
     private function ParseICSEvents(string $content): array
     {
+        $this->Debug('ParseICSEvents', 'Parsing ICS content');
         $lines = preg_split('/\r\n|\n|\r/', $content);
         if ($lines === false) {
+            $this->Debug('ParseICSEvents', 'Failed to split ICS lines');
             return [];
         }
 
@@ -380,6 +440,7 @@ class PreheatScheduler extends IPSModule
                     $event = $this->BuildEventFromLines($currentLines);
                     if ($event !== null) {
                         $events[] = $event;
+                        $this->Debug('ParseICSEvents', sprintf('Event parsed: start=%s end=%s', $event['start'] ?? 'n/a', $event['end'] ?? 'n/a'));
                     }
                 }
                 $inEvent = false;
@@ -390,6 +451,8 @@ class PreheatScheduler extends IPSModule
                 $currentLines[] = $line;
             }
         }
+
+        $this->Debug('ParseICSEvents', sprintf('Total events parsed: %d', count($events)));
 
         return $events;
     }
@@ -465,10 +528,12 @@ class PreheatScheduler extends IPSModule
         }
 
         if ($start === null || $end === null) {
+            $this->Debug('BuildEventFromLines', 'Missing start or end in event definition');
             return null;
         }
 
         if ($end <= $start) {
+            $this->Debug('BuildEventFromLines', sprintf('Invalid event duration start=%d end=%d', $start, $end));
             return null;
         }
 
@@ -610,7 +675,33 @@ class PreheatScheduler extends IPSModule
 
     private function Log(string $message): void
     {
-        IPS_LogMessage('PreheatScheduler', sprintf('#%d %s', $this->InstanceID, $message));
+        $formatted = sprintf('#%d %s', $this->InstanceID, $message);
+        IPS_LogMessage('PreheatScheduler', $formatted);
+        $this->Debug('Log', $formatted);
+    }
+
+    private function Debug(string $messageName, $data, int $format = 0): void
+    {
+        if (is_array($data) || is_object($data)) {
+            $encoded = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            if ($encoded !== false) {
+                $data = $encoded;
+                $format = 0;
+            } else {
+                $data = print_r($data, true);
+                $format = 0;
+            }
+        }
+
+        if (is_bool($data)) {
+            $data = $data ? 'true' : 'false';
+        }
+
+        if (!is_string($data)) {
+            $data = (string) $data;
+        }
+
+        $this->SendDebug($messageName, $data, $format);
     }
 
     private function UpdateEventOverview(array $events, int $now, ?string $errorMessage): void
@@ -721,6 +812,7 @@ class PreheatScheduler extends IPSModule
     {
         $rules = $this->GetBlacklistRules();
         if (empty($rules)) {
+            $this->Debug('FilterBlacklist', 'No blacklist rules configured');
             return $events;
         }
 
@@ -730,16 +822,21 @@ class PreheatScheduler extends IPSModule
                 continue;
             }
             if ($this->IsEventBlacklisted($event, $rules)) {
+                $summary = is_string($event['summary'] ?? null) ? $event['summary'] : '';
+                $this->Debug('FilterBlacklist', sprintf('Event filtered: %s', $summary));
                 continue;
             }
             $filtered[] = $event;
         }
+
+        $this->Debug('FilterBlacklist', sprintf('Events kept after filtering: %d', count($filtered)));
 
         return $filtered;
     }
 
     private function ExpandRecurringEvents(array $events, int $windowStart, int $windowEnd): array
     {
+        $this->Debug('ExpandRecurring', sprintf('Expanding events between %d and %d', $windowStart, $windowEnd));
         $expanded = [];
 
         $cancelledOccurrences = [];
@@ -760,8 +857,10 @@ class PreheatScheduler extends IPSModule
                         $cancelledOccurrences[$uid] = [];
                     }
                     $cancelledOccurrences[$uid][$recurrenceId] = true;
+                    $this->Debug('ExpandRecurring', sprintf('Cancelled occurrence recorded for %s at %d', $uid, $recurrenceId));
                 } else {
                     $cancelledSeries[$uid] = true;
+                    $this->Debug('ExpandRecurring', sprintf('Cancelled series recorded for %s', $uid));
                 }
             }
         }
@@ -773,6 +872,7 @@ class PreheatScheduler extends IPSModule
 
             $duration = (int) $event['end'] - (int) $event['start'];
             if ($duration <= 0) {
+                $this->Debug('ExpandRecurring', 'Skipping event with non-positive duration');
                 continue;
             }
 
@@ -782,11 +882,13 @@ class PreheatScheduler extends IPSModule
             if ($isCancelled) {
                 if ($event['end'] > $windowStart && $event['start'] <= $windowEnd) {
                     $expanded[] = $event;
+                    $this->Debug('ExpandRecurring', sprintf('Keeping cancelled event within window: %s', $uid));
                 }
                 continue;
             }
 
             if ($uid !== '' && isset($cancelledSeries[$uid])) {
+                $this->Debug('ExpandRecurring', sprintf('Skipping event due to cancelled series: %s', $uid));
                 continue;
             }
 
@@ -827,15 +929,18 @@ class PreheatScheduler extends IPSModule
 
             foreach ($occurrenceStarts as $startTimestamp) {
                 if (in_array($startTimestamp, $exdates, true)) {
+                    $this->Debug('ExpandRecurring', sprintf('Skipping excluded occurrence %s at %d', $uid, $startTimestamp));
                     continue;
                 }
 
                 if ($uid !== '' && isset($cancelledOccurrences[$uid][$startTimestamp])) {
+                    $this->Debug('ExpandRecurring', sprintf('Skipping cancelled occurrence %s at %d', $uid, $startTimestamp));
                     continue;
                 }
 
                 $endTimestamp = $startTimestamp + $duration;
                 if ($endTimestamp <= 0) {
+                    $this->Debug('ExpandRecurring', 'Skipping occurrence with non-positive end time');
                     continue;
                 }
 
@@ -850,23 +955,29 @@ class PreheatScheduler extends IPSModule
                 $occurrence['rdates'] = [];
                 $occurrence['exdates'] = [];
                 $expanded[] = $occurrence;
+                $this->Debug('ExpandRecurring', sprintf('Occurrence added %s start=%d end=%d', $uid, $startTimestamp, $endTimestamp));
             }
         }
 
         usort($expanded, static fn($a, $b) => ($a['start'] ?? 0) <=> ($b['start'] ?? 0));
+
+        $this->Debug('ExpandRecurring', sprintf('Total expanded events: %d', count($expanded)));
 
         return $expanded;
     }
 
     private function GenerateRRuleOccurrences(int $baseStart, string $rrule, ?string $timezoneName, int $windowStart, int $windowEnd): array
     {
+        $this->Debug('GenerateRRule', sprintf('Generating occurrences for rule %s', $rrule));
         $rule = $this->ParseRRule($rrule);
         if (empty($rule)) {
+            $this->Debug('GenerateRRule', 'Parsed rule is empty');
             return [];
         }
 
         $freq = strtoupper($rule['FREQ'] ?? '');
         if ($freq === '') {
+            $this->Debug('GenerateRRule', 'Frequency missing in rule');
             return [];
         }
 
@@ -875,6 +986,7 @@ class PreheatScheduler extends IPSModule
         if (array_key_exists('COUNT', $rule)) {
             $count = max(0, (int) $rule['COUNT']);
             if ($count <= 1) {
+                $this->Debug('GenerateRRule', 'Count exhausted or not sufficient');
                 return [];
             }
             $remaining = $count - 1;
@@ -884,6 +996,7 @@ class PreheatScheduler extends IPSModule
         if (array_key_exists('UNTIL', $rule)) {
             $until = $this->ParseRRuleUntil($rule['UNTIL'], $timezoneName, $baseStart);
             if ($until !== null && $until < $baseStart) {
+                $this->Debug('GenerateRRule', 'Until date precedes base start');
                 return [];
             }
         }
@@ -947,6 +1060,7 @@ class PreheatScheduler extends IPSModule
                 $current = $current->add(new DateInterval('P' . $interval . 'D'));
             }
 
+            $this->Debug('GenerateRRule', sprintf('Daily rule generated %d occurrences', count($occurrences)));
             return $occurrences;
         }
 
@@ -1041,9 +1155,11 @@ class PreheatScheduler extends IPSModule
                 }
             }
 
+            $this->Debug('GenerateRRule', sprintf('Weekly rule generated %d occurrences', count($occurrences)));
             return $occurrences;
         }
 
+        $this->Debug('GenerateRRule', 'Frequency not supported');
         return [];
     }
 
@@ -1137,16 +1253,19 @@ class PreheatScheduler extends IPSModule
     {
         $raw = $this->ReadPropertyString('EventBlacklist');
         if ($raw === '') {
+            $this->Debug('BlacklistRules', 'No blacklist configured');
             return [];
         }
 
         $decoded = json_decode($raw, true);
         if ($decoded === null && json_last_error() !== JSON_ERROR_NONE) {
             $this->Log('Unable to decode event blacklist: ' . json_last_error_msg());
+            $this->Debug('BlacklistRules', 'Blacklist JSON decode failed');
             return [];
         }
 
         if (!is_array($decoded)) {
+            $this->Debug('BlacklistRules', 'Blacklist configuration not an array');
             return [];
         }
 
@@ -1160,6 +1279,7 @@ class PreheatScheduler extends IPSModule
                 if (!$this->legacyBlacklistWarningIssued) {
                     $this->legacyBlacklistWarningIssued = true;
                     $this->Log('Regex blacklist entries are no longer supported. Please update the blacklist configuration.');
+                    $this->Debug('BlacklistRules', 'Legacy blacklist entry encountered');
                 }
                 continue;
             }
@@ -1176,6 +1296,8 @@ class PreheatScheduler extends IPSModule
                 'ends_with'   => $endsWith
             ];
         }
+
+        $this->Debug('BlacklistRules', sprintf('Loaded blacklist rules: %d', count($rules)));
 
         return $rules;
     }
