@@ -17,6 +17,13 @@
     },
     {
       "type": "NumberSpinner",
+      "name": "CalendarTimeoutSec",
+      "caption": "Calendar request timeout (seconds)",
+      "minimum": 1,
+      "maximum": 300
+    },
+    {
+      "type": "NumberSpinner",
       "name": "SetpointWarm",
       "caption": "Warm setpoint (°C)",
       "digits": 1,

@@ -17,6 +17,7 @@ class PreheatScheduler extends IPSModule
         $this->RegisterPropertyString('CalendarURL', '');
         $this->RegisterPropertyString('CalUser', '');
         $this->RegisterPropertyString('CalPass', '');
+        $this->RegisterPropertyInteger('CalendarTimeoutSec', 60);
         $this->RegisterPropertyFloat('SetpointWarm', 21.0);
         $this->RegisterPropertyFloat('HeatingRate', 1.0);
         $this->RegisterPropertyInteger('TempVarID', 0);
@@ -346,8 +347,10 @@ class PreheatScheduler extends IPSModule
     {
         $user = $this->ReadPropertyString('CalUser');
         $pass = $this->ReadPropertyString('CalPass');
+        $timeoutSeconds = max(1, $this->ReadPropertyInteger('CalendarTimeoutSec'));
 
         $this->Debug('FetchCalendar', sprintf('Fetching calendar from %s', $calendarUrl));
+        $this->Debug('FetchCalendar', sprintf('Configured timeout: %d seconds', $timeoutSeconds));
 
         $urlsToTry = [];
         $trimmed = rtrim($calendarUrl);
@@ -365,10 +368,13 @@ class PreheatScheduler extends IPSModule
             $this->Debug('FetchCalendar', 'Authentication configured for calendar fetch');
         }
 
+        $options = $auth;
+        $options['Timeout'] = $timeoutSeconds * 1000;
+
         $lastError = '';
         foreach ($urlsToTry as $url) {
             error_clear_last();
-            $content = @Sys_GetURLContentEx($url, $auth);
+            $content = @Sys_GetURLContentEx($url, $options);
             if ($content !== false && $content !== null) {
                 if ($url !== $trimmed) {
                     $this->Log('Calendar fetched using export helper URL: ' . $url);
