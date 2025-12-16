@@ -446,7 +446,10 @@ class PreheatScheduler extends IPSModule
                     $event = $this->BuildEventFromLines($currentLines);
                     if ($event !== null) {
                         $events[] = $event;
-                        $this->Debug('ParseICSEvents', sprintf('Event parsed: start=%s end=%s', $event['start'] ?? 'n/a', $event['end'] ?? 'n/a'));
+                        $summary = trim((string) ($event['summary'] ?? ''));
+                        $startISO = isset($event['start']) ? date('c', (int) $event['start']) : 'n/a';
+                        $endISO = isset($event['end']) ? date('c', (int) $event['end']) : 'n/a';
+                        $this->Debug('ParseICSEvents', sprintf('Event parsed: "%s" start=%s end=%s', $summary, $startISO, $endISO));
                     }
                 }
                 $inEvent = false;
@@ -534,14 +537,16 @@ class PreheatScheduler extends IPSModule
         }
 
         if ($start === null || $end === null) {
-            $this->Debug('BuildEventFromLines', 'Missing start or end in event definition');
+            $this->Debug('BuildEventFromLines', sprintf('Missing start or end in event definition (summary="%s")', $summary));
             return null;
         }
 
         if ($end <= $start) {
-            $this->Debug('BuildEventFromLines', sprintf('Invalid event duration start=%d end=%d', $start, $end));
+            $this->Debug('BuildEventFromLines', sprintf('Invalid event duration start=%d end=%d summary="%s"', $start, $end, $summary));
             return null;
         }
+
+        $this->Debug('BuildEventFromLines', sprintf('Event "%s" times parsed start=%s end=%s', $summary, date('c', $start), date('c', $end)));
 
         return [
             'start' => $start,
@@ -961,7 +966,8 @@ class PreheatScheduler extends IPSModule
                 $occurrence['rdates'] = [];
                 $occurrence['exdates'] = [];
                 $expanded[] = $occurrence;
-                $this->Debug('ExpandRecurring', sprintf('Occurrence added %s start=%d end=%d', $uid, $startTimestamp, $endTimestamp));
+                $summary = trim((string) ($event['summary'] ?? ''));
+                $this->Debug('ExpandRecurring', sprintf('Occurrence added %s "%s" start=%s end=%s', $uid, $summary, date('c', $startTimestamp), date('c', $endTimestamp)));
             }
         }
 
@@ -1165,7 +1171,136 @@ class PreheatScheduler extends IPSModule
             return $occurrences;
         }
 
-        $this->Debug('GenerateRRule', 'Frequency not supported');
+        if ($freq === 'MONTHLY') {
+            $bydayTokens = [];
+            if (array_key_exists('BYDAY', $rule)) {
+                $bydayTokens = array_filter(array_map('trim', explode(',', (string) $rule['BYDAY'])));
+            }
+
+            $bydayRules = [];
+            foreach ($bydayTokens as $token) {
+                if ($token === '') {
+                    continue;
+                }
+
+                $number = null;
+                $weekdayToken = $token;
+
+                if (preg_match('/^(-?\d+)([A-Z]{2})$/i', $token, $matches) === 1) {
+                    $number = (int) $matches[1];
+                    $weekdayToken = $matches[2];
+                }
+
+                $weekday = $this->MapWeekday($weekdayToken);
+                if ($weekday !== null) {
+                    $bydayRules[] = ['nth' => $number, 'weekday' => $weekday];
+                }
+            }
+
+            $baseDay = (int) $baseDate->format('j');
+            $baseHour = (int) $baseDate->format('G');
+            $baseMinute = (int) $baseDate->format('i');
+            $baseSecond = (int) $baseDate->format('s');
+
+            $anchorMonth = $baseDate->modify('first day of this month')->setTime($baseHour, $baseMinute, $baseSecond);
+            $windowDate = (new DateTimeImmutable('@' . $windowStart))->setTimezone($tz);
+            $monthsDiff = ((int) $windowDate->format('Y') - (int) $anchorMonth->format('Y')) * 12;
+            $monthsDiff += (int) $windowDate->format('n') - (int) $anchorMonth->format('n');
+            $startIndex = $monthsDiff > 0 ? (int) floor($monthsDiff / $interval) : 0;
+            if ($startIndex < 1) {
+                $startIndex = 1;
+            }
+
+            $iteration = 0;
+            for ($monthOffset = $startIndex; $remaining === null || $remaining > 0; $monthOffset++) {
+                $iteration++;
+                if ($iteration > 240) {
+                    break;
+                }
+
+                $candidateMonth = $anchorMonth->add(new DateInterval('P' . ($monthOffset * $interval) . 'M'));
+
+                $candidates = [];
+                if (!empty($bydayRules)) {
+                    foreach ($bydayRules as $ruleDef) {
+                        $nth = $ruleDef['nth'];
+                        $weekday = $ruleDef['weekday'];
+                        $monthFirst = $candidateMonth->setDate((int) $candidateMonth->format('Y'), (int) $candidateMonth->format('n'), 1);
+                        $firstWeekday = (int) $monthFirst->format('w');
+                        $firstOffset = ($weekday - $firstWeekday + 7) % 7;
+                        $firstOccurrence = $monthFirst->modify('+' . $firstOffset . ' days');
+
+                        if ($nth === null) {
+                            $current = $firstOccurrence;
+                            while ((int) $current->format('n') === (int) $candidateMonth->format('n')) {
+                                $candidates[] = $current;
+                                $current = $current->modify('+7 days');
+                            }
+                        } elseif ($nth > 0) {
+                            $candidate = $firstOccurrence->modify('+' . (($nth - 1) * 7) . ' days');
+                            if ((int) $candidate->format('n') === (int) $candidateMonth->format('n')) {
+                                $candidates[] = $candidate;
+                            }
+                        } else {
+                            $monthLast = $monthFirst->modify('last day of this month');
+                            $lastWeekday = (int) $monthLast->format('w');
+                            $backOffset = ($lastWeekday - $weekday + 7) % 7;
+                            $lastOccurrence = $monthLast->modify('-' . $backOffset . ' days');
+                            $weeksBack = abs($nth) - 1;
+                            $candidate = $lastOccurrence->modify('-' . ($weeksBack * 7) . ' days');
+                            if ((int) $candidate->format('n') === (int) $candidateMonth->format('n')) {
+                                $candidates[] = $candidate;
+                            }
+                        }
+                    }
+                } else {
+                    $monthLastDay = (int) $candidateMonth->format('t');
+                    $day = min($baseDay, $monthLastDay);
+                    $candidates[] = $candidateMonth->setDate((int) $candidateMonth->format('Y'), (int) $candidateMonth->format('n'), $day);
+                }
+
+                foreach ($candidates as $candidate) {
+                    $timestamp = $candidate->getTimestamp();
+                    if ($timestamp <= $baseStart) {
+                        continue;
+                    }
+
+                    if ($until !== null && $timestamp > $until) {
+                        $remaining = 0;
+                        break 2;
+                    }
+
+                    if ($timestamp < $windowStart) {
+                        if ($remaining !== null) {
+                            if ($remaining === 0) {
+                                break 2;
+                            }
+                            $remaining--;
+                        }
+                        continue;
+                    }
+
+                    if ($timestamp > $windowEnd) {
+                        $remaining = 0;
+                        break 2;
+                    }
+
+                    $occurrences[] = $timestamp;
+
+                    if ($remaining !== null) {
+                        $remaining--;
+                        if ($remaining <= 0) {
+                            break 2;
+                        }
+                    }
+                }
+            }
+
+            $this->Debug('GenerateRRule', sprintf('Monthly rule generated %d occurrences', count($occurrences)));
+            return $occurrences;
+        }
+
+        $this->Debug('GenerateRRule', sprintf('Frequency %s not supported', $freq));
         return [];
     }
 
