@@ -1171,6 +1171,188 @@ class PreheatScheduler extends IPSModule
             return $occurrences;
         }
 
+        if ($freq === 'YEARLY') {
+            $bydayTokens = [];
+            if (array_key_exists('BYDAY', $rule)) {
+                $bydayTokens = array_filter(array_map('trim', explode(',', (string) $rule['BYDAY'])));
+            }
+
+            $bydayRules = [];
+            foreach ($bydayTokens as $token) {
+                if ($token === '') {
+                    continue;
+                }
+
+                $number = null;
+                $weekdayToken = $token;
+
+                if (preg_match('/^(-?\d+)([A-Z]{2})$/i', $token, $matches) === 1) {
+                    $number = (int) $matches[1];
+                    $weekdayToken = $matches[2];
+                }
+
+                $weekday = $this->MapWeekday($weekdayToken);
+                if ($weekday !== null) {
+                    $bydayRules[] = ['nth' => $number, 'weekday' => $weekday];
+                }
+            }
+
+            $bymonthTokens = [];
+            if (array_key_exists('BYMONTH', $rule)) {
+                $bymonthTokens = array_filter(array_map('trim', explode(',', (string) $rule['BYMONTH'])));
+            }
+
+            $months = [];
+            foreach ($bymonthTokens as $token) {
+                $month = (int) $token;
+                if ($month >= 1 && $month <= 12) {
+                    $months[] = $month;
+                }
+            }
+            if (empty($months)) {
+                $months[] = (int) $baseDate->format('n');
+            }
+            $months = array_values(array_unique($months));
+            sort($months);
+
+            $bymonthdayTokens = [];
+            if (array_key_exists('BYMONTHDAY', $rule)) {
+                $bymonthdayTokens = array_filter(array_map('trim', explode(',', (string) $rule['BYMONTHDAY'])));
+            }
+
+            $monthDays = [];
+            foreach ($bymonthdayTokens as $token) {
+                if ($token === '') {
+                    continue;
+                }
+
+                $day = (int) $token;
+                if ($day !== 0) {
+                    $monthDays[] = $day;
+                }
+            }
+            $monthDays = array_values(array_unique($monthDays));
+            sort($monthDays);
+
+            $baseDay = (int) $baseDate->format('j');
+            $baseHour = (int) $baseDate->format('G');
+            $baseMinute = (int) $baseDate->format('i');
+            $baseSecond = (int) $baseDate->format('s');
+
+            $anchorYear = $baseDate->setDate((int) $baseDate->format('Y'), 1, 1)->setTime($baseHour, $baseMinute, $baseSecond);
+            $windowDate = (new DateTimeImmutable('@' . $windowStart))->setTimezone($tz);
+            $yearsDiff = (int) $windowDate->format('Y') - (int) $anchorYear->format('Y');
+            $startIndex = $yearsDiff > 0 ? (int) floor($yearsDiff / $interval) : 0;
+            if ($startIndex < 1) {
+                $startIndex = 1;
+            }
+
+            $iteration = 0;
+            for ($yearOffset = $startIndex; $remaining === null || $remaining > 0; $yearOffset++) {
+                $iteration++;
+                if ($iteration > 80) {
+                    break;
+                }
+
+                $candidateYear = $anchorYear->add(new DateInterval('P' . ($yearOffset * $interval) . 'Y'));
+
+                foreach ($months as $month) {
+                    $candidateMonth = $candidateYear->setDate((int) $candidateYear->format('Y'), $month, 1);
+                    $candidates = [];
+
+                    if (!empty($bydayRules)) {
+                        foreach ($bydayRules as $ruleDef) {
+                            $nth = $ruleDef['nth'];
+                            $weekday = $ruleDef['weekday'];
+                            $monthFirst = $candidateMonth->setDate((int) $candidateMonth->format('Y'), $month, 1);
+                            $firstWeekday = (int) $monthFirst->format('w');
+                            $firstOffset = ($weekday - $firstWeekday + 7) % 7;
+                            $firstOccurrence = $monthFirst->modify('+' . $firstOffset . ' days');
+
+                            if ($nth === null) {
+                                $current = $firstOccurrence;
+                                while ((int) $current->format('n') === $month) {
+                                    $candidates[] = $current;
+                                    $current = $current->modify('+7 days');
+                                }
+                            } elseif ($nth > 0) {
+                                $candidate = $firstOccurrence->modify('+' . (($nth - 1) * 7) . ' days');
+                                if ((int) $candidate->format('n') === $month) {
+                                    $candidates[] = $candidate;
+                                }
+                            } else {
+                                $monthLast = $monthFirst->modify('last day of this month');
+                                $lastWeekday = (int) $monthLast->format('w');
+                                $backOffset = ($lastWeekday - $weekday + 7) % 7;
+                                $lastOccurrence = $monthLast->modify('-' . $backOffset . ' days');
+                                $weeksBack = abs($nth) - 1;
+                                $candidate = $lastOccurrence->modify('-' . ($weeksBack * 7) . ' days');
+                                if ((int) $candidate->format('n') === $month) {
+                                    $candidates[] = $candidate;
+                                }
+                            }
+                        }
+                    } elseif (!empty($monthDays)) {
+                        $monthLastDay = (int) $candidateMonth->format('t');
+                        foreach ($monthDays as $day) {
+                            $targetDay = $day;
+                            if ($day < 0) {
+                                $targetDay = $monthLastDay + $day + 1;
+                            }
+                            if ($targetDay < 1 || $targetDay > $monthLastDay) {
+                                continue;
+                            }
+
+                            $candidates[] = $candidateMonth->setDate((int) $candidateMonth->format('Y'), $month, $targetDay)->setTime($baseHour, $baseMinute, $baseSecond);
+                        }
+                    } else {
+                        $monthLastDay = (int) $candidateMonth->format('t');
+                        $day = min($baseDay, $monthLastDay);
+                        $candidates[] = $candidateMonth->setDate((int) $candidateMonth->format('Y'), $month, $day);
+                    }
+
+                    foreach ($candidates as $candidate) {
+                        $timestamp = $candidate->getTimestamp();
+                        if ($timestamp <= $baseStart) {
+                            continue;
+                        }
+
+                        if ($until !== null && $timestamp > $until) {
+                            $remaining = 0;
+                            break 3;
+                        }
+
+                        if ($timestamp < $windowStart) {
+                            if ($remaining !== null) {
+                                if ($remaining === 0) {
+                                    break 3;
+                                }
+                                $remaining--;
+                            }
+                            continue;
+                        }
+
+                        if ($timestamp > $windowEnd) {
+                            $remaining = 0;
+                            break 3;
+                        }
+
+                        $occurrences[] = $timestamp;
+
+                        if ($remaining !== null) {
+                            $remaining--;
+                            if ($remaining <= 0) {
+                                break 3;
+                            }
+                        }
+                    }
+                }
+            }
+
+            $this->Debug('GenerateRRule', sprintf('Yearly rule generated %d occurrences', count($occurrences)));
+            return $occurrences;
+        }
+
         if ($freq === 'MONTHLY') {
             $bydayTokens = [];
             if (array_key_exists('BYDAY', $rule)) {
