@@ -97,10 +97,12 @@ class PreheatScheduler extends IPSModule
         }
     }
 
-    public function Recalculate(): bool
+    public function Recalculate(?int $now = null): bool
     {
         $this->Debug('Recalculate', 'Recalculation started');
-        $now = time();
+        if ($now === null) {
+            $now = time();
+        }
         $this->Debug('Recalculate', sprintf('Current timestamp: %d', $now));
         $event = $this->DetermineNextEvent($now);
         $this->Debug('Recalculate', $event === null ? 'No upcoming event detected' : 'Upcoming event detected');
@@ -141,12 +143,15 @@ class PreheatScheduler extends IPSModule
         $eventStartISO = '-';
         $preheatStartISO = '-';
         $activeEventEnd = null;
+        $effectivePreheatStart = 0;
+        $effectiveEventStart = 0;
 
         if ($event !== null) {
             $eventStart = $event['start'];
             $eventEnd = $event['end'];
             $eventStartISO = date('c', $eventStart);
             $activeEventEnd = $eventEnd;
+            $effectiveEventStart = $eventStart;
 
             $this->Debug('Recalculate', sprintf('Processing event: start=%d end=%d', $eventStart, $eventEnd));
 
@@ -170,6 +175,7 @@ class PreheatScheduler extends IPSModule
                 $preheatStart = 0;
             }
 
+            $effectivePreheatStart = $preheatStart;
             $this->WriteAttributeInteger('LastPreheatStart', $preheatStart);
             $preheatStartISO = $preheatStart > 0 ? date('c', $preheatStart) : '-';
 
@@ -200,6 +206,8 @@ class PreheatScheduler extends IPSModule
             $stored = $this->GetStoredEvent();
             if ($stored !== null) {
                 $activeEventEnd = $stored['end'];
+                $effectiveEventStart = $stored['start'];
+                $effectivePreheatStart = $this->ReadAttributeInteger('LastPreheatStart');
                 if ($now < $stored['end']) {
                     if ($currentlyOn) {
                         $shouldBeOn = true;
@@ -209,9 +217,29 @@ class PreheatScheduler extends IPSModule
             }
         }
 
+        $holdWindowStart = 0;
+        if ($effectivePreheatStart > 0) {
+            $holdWindowStart = $effectivePreheatStart;
+        } elseif ($effectiveEventStart > 0) {
+            $holdWindowStart = $effectiveEventStart;
+        }
+
         if ($currentlyOn && !$shouldBeOn && $demandHoldUntil > $now) {
-            $shouldBeOn = true;
-            $this->Debug('Recalculate', 'Demand hold is keeping heating on');
+            $holdApplies = $holdWindowStart > 0 && $now >= $holdWindowStart && ($activeEventEnd === null || $now < $activeEventEnd);
+            $this->Debug('Recalculate', sprintf(
+                'Evaluating demand hold: now=%d holdUntil=%d holdWindowStart=%d preheatStart=%d eventStart=%d eventEnd=%s applies=%s',
+                $now,
+                $demandHoldUntil,
+                $holdWindowStart,
+                $effectivePreheatStart,
+                $effectiveEventStart,
+                $activeEventEnd === null ? 'null' : (string) $activeEventEnd,
+                $holdApplies ? 'true' : 'false'
+            ));
+            if ($holdApplies) {
+                $shouldBeOn = true;
+                $this->Debug('Recalculate', 'Demand hold is keeping heating on');
+            }
         }
 
         $this->SetValue('NextEventStartISO', $eventStartISO);
@@ -225,7 +253,13 @@ class PreheatScheduler extends IPSModule
         if ($shouldBeOn) {
             if ($activeEventEnd !== null && $activeEventEnd !== $demandHoldUntil) {
                 $this->WriteAttributeInteger('DemandHoldUntil', $activeEventEnd);
-                $this->Debug('Recalculate', sprintf('Demand hold updated to %d', $activeEventEnd));
+                $this->Debug('Recalculate', sprintf(
+                    'Demand hold updated to %d (now=%d preheatStart=%d eventStart=%d)',
+                    $activeEventEnd,
+                    $now,
+                    $effectivePreheatStart,
+                    $effectiveEventStart
+                ));
             }
         } else {
             if ($demandHoldUntil !== 0 && $demandHoldUntil <= $now) {
@@ -251,7 +285,7 @@ class PreheatScheduler extends IPSModule
         $this->SetTimerInterval('Evaluate', $interval * 1000);
     }
 
-    private function DetermineNextEvent(int $now): ?array
+    protected function DetermineNextEvent(int $now): ?array
     {
         $calendarUrl = trim($this->ReadPropertyString('CalendarURL'));
         if ($calendarUrl === '') {
@@ -952,6 +986,11 @@ class PreheatScheduler extends IPSModule
                 $endTimestamp = $startTimestamp + $duration;
                 if ($endTimestamp <= 0) {
                     $this->Debug('ExpandRecurring', 'Skipping occurrence with non-positive end time');
+                    continue;
+                }
+
+                if ($endTimestamp <= $windowStart) {
+                    $this->Debug('ExpandRecurring', sprintf('Skipping occurrence ending before window: %s at %d', $uid, $endTimestamp));
                     continue;
                 }
 
