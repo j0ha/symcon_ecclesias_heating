@@ -5,7 +5,7 @@ PreheatScheduler fetches usage events from a CalDAV/ICS calendar and raises a he
 ## Usage
 
 1. Import the library into IP-Symcon and create an instance of **PreheatScheduler**.
-2. Provide the calendar URL. Use a direct `.ics` export link when possible. For CalDAV collections append `?export` (Nextcloud/Owncloud) or rely on the module to try it automatically. Supply credentials if required.
+2. Provide the calendar URL. The module now issues a CalDAV `REPORT` request (RFC 4791 section 7.8.1) using the configured lookahead window so only upcoming events are returned. Supply credentials if required.
 3. Select the temperature status variable that reflects the current room temperature.
 4. Configure the warm setpoint, heating rate (°C per hour), optional preheat buffer and evaluation interval.
 5. Choose the hold strategy (keep heating demand until the event ends or only until it starts).
