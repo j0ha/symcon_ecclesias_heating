@@ -296,7 +296,7 @@ class PreheatScheduler extends IPSModule
             return $this->GetStoredEventForFallback($now);
         }
 
-        $content = $this->FetchCalendarContent($calendarUrl);
+        $content = $this->FetchCalendarContent($calendarUrl, $now);
         if ($content === null) {
             $this->Debug('DetermineNextEvent', 'Calendar content fetch failed');
             $this->UpdateEventOverview([], $now, $this->Translate('Kalender konnte nicht geladen werden.'));
@@ -377,52 +377,83 @@ class PreheatScheduler extends IPSModule
         return $nextEvent;
     }
 
-    private function FetchCalendarContent(string $calendarUrl): ?string
+    private function FetchCalendarContent(string $calendarUrl, int $now): ?string
     {
         $user = $this->ReadPropertyString('CalUser');
         $pass = $this->ReadPropertyString('CalPass');
         $timeoutSeconds = max(1, $this->ReadPropertyInteger('CalendarTimeoutSec'));
 
-        $this->Debug('FetchCalendar', sprintf('Fetching calendar from %s', $calendarUrl));
+        if (!function_exists('curl_init')) {
+            $this->Log('CalDAV request failed: cURL extension is not available.');
+            $this->SetStatus(self::STATUS_URL_ERROR);
+            return null;
+        }
+
+        $lookaheadSeconds = max(1, $this->ReadPropertyInteger('LookaheadHours')) * 3600;
+        $start = (new DateTimeImmutable('@' . $now))->setTimezone(new DateTimeZone('UTC'));
+        $end = $start->add(new DateInterval('PT' . $lookaheadSeconds . 'S'));
+
+        $reportBody = $this->BuildCalendarQueryXml($start, $end);
+        $this->Debug('FetchCalendar', sprintf('Time window start=%s end=%s', $start->format('c'), $end->format('c')));
+
+        $trimmedUrl = rtrim($calendarUrl);
+
+        $this->Debug('FetchCalendar', sprintf('Fetching calendar from %s', $trimmedUrl));
         $this->Debug('FetchCalendar', sprintf('Configured timeout: %d seconds', $timeoutSeconds));
 
         $urlsToTry = [];
-        $trimmed = rtrim($calendarUrl);
-        if (!preg_match('/\.ics($|\?)/i', $trimmed) && !str_contains($trimmed, '?export')) {
-            $separator = str_contains($trimmed, '?') ? '&' : '?';
-            $urlsToTry[] = $trimmed . $separator . 'export';
-            $this->Debug('FetchCalendar', sprintf('Added export helper URL: %s', $trimmed . $separator . 'export'));
-        }
-        $urlsToTry[] = $trimmed;
-
-        $auth = [];
-        if ($user !== '' || $pass !== '') {
-            $auth['AuthUser'] = $user;
-            $auth['AuthPass'] = $pass;
-            $this->Debug('FetchCalendar', 'Authentication configured for calendar fetch');
-        }
-
-        $options = $auth;
-        $options['Timeout'] = $timeoutSeconds * 1000;
+        $urlsToTry[] = $trimmedUrl;
 
         $lastError = '';
         foreach ($urlsToTry as $url) {
-            error_clear_last();
-            $content = @Sys_GetURLContentEx($url, $options);
-            if ($content !== false && $content !== null) {
-                if ($url !== $trimmed) {
-                    $this->Log('Calendar fetched using export helper URL: ' . $url);
-                    $this->Debug('FetchCalendar', sprintf('Calendar fetched via helper URL: %s', $url));
+            $ch = curl_init($url);
+            $curlOptions = [
+                CURLOPT_CUSTOMREQUEST => 'REPORT',
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_HTTPHEADER => [
+                    'Depth: 1',
+                    'Content-Type: application/xml; charset=utf-8',
+                    'Accept: application/xml',
+                ],
+                CURLOPT_POSTFIELDS => $reportBody,
+                CURLOPT_TIMEOUT => $timeoutSeconds,
+            ];
+
+            if ($user !== '' || $pass !== '') {
+                $curlOptions[CURLOPT_USERPWD] = $user . ':' . $pass;
+            }
+
+            curl_setopt_array($ch, $curlOptions);
+
+            $response = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $curlError = curl_error($ch);
+            curl_close($ch);
+
+            if ($response !== false && $httpCode >= 200 && $httpCode < 300) {
+                $icsPayloads = $this->ExtractIcsPayloadsFromResponse($response);
+                if (!empty($icsPayloads)) {
+                    $response = implode("\n", $icsPayloads);
                 }
+
                 $this->SetStatus(self::STATUS_OK);
-                $this->Debug('FetchCalendar', 'Calendar content fetched successfully');
-                return $content;
+                $this->Debug('FetchCalendar', sprintf('CalDAV REPORT succeeded with %d', $httpCode));
+                return $response;
             }
-            $error = error_get_last();
-            if ($error !== null) {
-                $lastError = $error['message'] ?? '';
-                $this->Debug('FetchCalendar', sprintf('Fetch attempt failed for %s: %s', $url, $lastError));
+
+            if ($curlError !== '') {
+                $lastError = $curlError;
+                $this->Debug('FetchCalendar', sprintf('CalDAV REPORT failed for %s: %s (HTTP %d)', $url, $curlError, $httpCode));
+            } else {
+                $lastError = sprintf('HTTP %d', $httpCode);
+                $this->Debug('FetchCalendar', sprintf('CalDAV REPORT failed for %s with status %d', $url, $httpCode));
             }
+        }
+
+        $legacyContent = $this->FetchCalendarContentLegacy($trimmedUrl, $user, $pass, $timeoutSeconds);
+        if ($legacyContent !== null) {
+            $this->SetStatus(self::STATUS_OK);
+            return $legacyContent;
         }
 
         if ($lastError !== '') {
@@ -437,6 +468,97 @@ class PreheatScheduler extends IPSModule
             $this->SetStatus(self::STATUS_AUTH_ERROR);
         } else {
             $this->SetStatus(self::STATUS_URL_ERROR);
+        }
+
+        return null;
+    }
+
+    private function BuildCalendarQueryXml(DateTimeImmutable $start, DateTimeImmutable $end): string
+    {
+        $startStr = $start->format('Ymd\THis\Z');
+        $endStr = $end->format('Ymd\THis\Z');
+
+        return <<<XML
+<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <C:calendar-data>
+      <C:expand start="$startStr" end="$endStr"/>
+    </C:calendar-data>
+  </D:prop>
+  <C:filter>
+    <C:comp-filter name="VCALENDAR">
+      <C:comp-filter name="VEVENT">
+        <C:time-range start="$startStr" end="$endStr"/>
+      </C:comp-filter>
+    </C:comp-filter>
+  </C:filter>
+</C:calendar-query>
+XML;
+    }
+
+    private function ExtractIcsPayloadsFromResponse(string $response): array
+    {
+        $trimmed = ltrim($response);
+        if ($trimmed === '' || $trimmed[0] !== '<') {
+            return [];
+        }
+
+        libxml_use_internal_errors(true);
+        $xml = simplexml_load_string($response);
+        if ($xml === false) {
+            return [];
+        }
+
+        $xml->registerXPathNamespace('d', 'DAV:');
+        $xml->registerXPathNamespace('c', 'urn:ietf:params:xml:ns:caldav');
+        $nodes = $xml->xpath('//c:calendar-data');
+        if ($nodes === false || empty($nodes)) {
+            return [];
+        }
+
+        $payloads = [];
+        foreach ($nodes as $node) {
+            $payloads[] = html_entity_decode((string) $node, ENT_QUOTES | ENT_XML1, 'UTF-8');
+        }
+
+        return $payloads;
+    }
+
+    private function FetchCalendarContentLegacy(string $calendarUrl, string $user, string $pass, int $timeoutSeconds): ?string
+    {
+        $urlsToTry = [];
+        if (!preg_match('/\.ics($|\?)/i', $calendarUrl) && !str_contains($calendarUrl, '?export')) {
+            $separator = str_contains($calendarUrl, '?') ? '&' : '?';
+            $helperUrl = $calendarUrl . $separator . 'export';
+            $urlsToTry[] = $helperUrl;
+            $this->Debug('FetchCalendarLegacy', sprintf('Added export helper URL: %s', $helperUrl));
+        }
+        $urlsToTry[] = $calendarUrl;
+
+        $options = ['Timeout' => $timeoutSeconds * 1000];
+        if ($user !== '' || $pass !== '') {
+            $options['AuthUser'] = $user;
+            $options['AuthPass'] = $pass;
+            $this->Debug('FetchCalendarLegacy', 'Authentication configured for legacy fetch');
+        }
+
+        foreach ($urlsToTry as $url) {
+            error_clear_last();
+            $content = @Sys_GetURLContentEx($url, $options);
+            if ($content !== false && $content !== null) {
+                if ($url !== $calendarUrl) {
+                    $this->Log('Calendar fetched using export helper URL: ' . $url);
+                }
+                $this->Debug('FetchCalendarLegacy', sprintf('Legacy fetch succeeded for %s', $url));
+                return $content;
+            }
+
+            $error = error_get_last();
+            if ($error !== null) {
+                $lastError = $error['message'] ?? '';
+                $this->Debug('FetchCalendarLegacy', sprintf('Legacy fetch failed for %s: %s', $url, $lastError));
+            }
         }
 
         return null;
